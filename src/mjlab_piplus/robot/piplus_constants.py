@@ -237,11 +237,30 @@ PIPLUS_ARTICULATION = EntityArticulationInfoCfg(
   ),
   soft_joint_pos_limit_factor=0.9,
 )
-
 def get_piplus_robot_cfg() -> EntityCfg:
   return EntityCfg(
     init_state=HOME_KEYFRAME,
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
     articulation=PIPLUS_ARTICULATION,
+  )
+
+
+BALL_XML: Path = (
+  Path(os.path.dirname(__file__)) / "ball/ball.xml"
+)
+
+def get_ball_spec() -> mujoco.MjSpec:
+  return mujoco.MjSpec.from_file(str(BALL_XML))
+
+BALL_INIT = EntityCfg.InitialStateCfg(
+  pos=(1.5, 0.0, 0.11),
+  joint_pos={".*": 0.0},
+  joint_vel={".*": 0.0},
+)
+
+def get_ball_cfg() -> EntityCfg:
+  return EntityCfg(
+    init_state=BALL_INIT,
+    spec_fn=get_ball_spec,
   )
