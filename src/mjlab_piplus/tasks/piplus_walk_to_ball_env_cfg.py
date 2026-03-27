@@ -123,8 +123,8 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "twist": UniformVelocityCommandCfg(
             entity_name="robot",
             resampling_time_range=(3.0, 8.0),
-            rel_standing_envs=0.0,
-            rel_heading_envs=0.0,
+            rel_standing_envs=0.1,
+            rel_heading_envs=0.3,
             heading_command=False,
             heading_control_stiffness=0.0,
             debug_vis=True,
@@ -342,9 +342,9 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "command_name": "twist",
                 "velocity_stages": [
                     {"step": 0, "lin_vel_x": (0.0, 0.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
-                    {"step": 100 * 24, "lin_vel_x": (-0.25, 0.25), "lin_vel_y": (-0.1, 0.1), "ang_vel_z": (-0.5, 0.5)},
-                    {"step": 300 * 24, "lin_vel_x": (-0.5, 0.5), "lin_vel_y": (-0.2, 0.2), "ang_vel_z": (-1.0, 1.0)},
-                    {"step": 500 * 24, "lin_vel_x": (-1.0, 1.0), "lin_vel_y": (-0.5, 0.5), "ang_vel_z": (-1.0, 1.0)},
+                    {"step": 200 * 24, "lin_vel_x": (-0.25, 0.25), "lin_vel_y": (-0.1, 0.1), "ang_vel_z": (-0.5, 0.5)},
+                    {"step": 800 * 24, "lin_vel_x": (-0.75, 0.75), "lin_vel_y": (-0.4, 0.4), "ang_vel_z": (-1.0, 1.0)},
+                    {"step": 1200 * 24, "lin_vel_x": (-1.0, 1.0), "lin_vel_y": (-0.5, 0.5), "ang_vel_z": (-1.0, 1.0)},
                 ],
             },
         ),
