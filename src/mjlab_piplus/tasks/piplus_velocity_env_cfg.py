@@ -23,6 +23,7 @@ from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 from mjlab_piplus.robot.piplus_constants import get_piplus_robot_cfg
+from mjlab_piplus.tasks.mdp.diffusion_style_reward import DiffusionStyleReward
 
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -198,7 +199,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     "body_ang_vel": RewardTermCfg(
       func=mdp.body_angular_velocity_penalty,
       weight=-0.05,  # Override per-robot
-      params={"asset_cfg": SceneEntityCfg("robot", body_names=("base_link",))}, 
+      params={"asset_cfg": SceneEntityCfg("robot", body_names=("base_link",))},
     ),
     "angular_momentum": RewardTermCfg(
       func=mdp.angular_momentum_penalty,
@@ -293,6 +294,26 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
         "command_threshold": 0.05,
       },
     ),
+    "diffusion_style": RewardTermCfg(
+        func=DiffusionStyleReward,
+        weight=1.0,
+        params=dict(
+            checkpoint_path="/homes/17vahl/mjlab_piplus/epoch_0500.pt",
+            root_body_name="base_link",        # body name in your MJCF
+            robot_scale=0.25,               # your robot's size relative to training data
+            stance_shift=0.2,               # lateral EE offset in model-space metres
+            noise_levels=(0.1, 0.3, 0.7),
+            level_weights=(0.5, 0.3, 0.2),
+            # tune these to balance style components:
+            scale_root_vel_trans=1.0,
+            scale_root_vel_rot=1.0,
+            scale_foot_trans=1.0,
+            scale_foot_rot=0.5,
+            scale_hand_trans=1.0,
+            scale_hand_rot=0.5,
+            reward_scale=50.0,
+        ),
+    )
   }
   ##
   # Terminations

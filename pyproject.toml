@@ -12,6 +12,8 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "mjlab",
     "onnxruntime",
+    "tqdm>=4.67.3",
+    "transforms3d>=0.4.2",
 ]
 
 [project.entry-points."mjlab.tasks"]
