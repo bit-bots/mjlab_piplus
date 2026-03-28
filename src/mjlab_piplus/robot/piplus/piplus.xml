@@ -129,6 +129,9 @@
               <!-- <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="l_elbow_link" class="collision"/> -->
               <geom pos="0 0 -0.0724" quat="1 0 0 0" type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="l_wrist_link" class="visual"/>
               <!-- <geom pos="0 0 -0.0724" quat="1 0 0 0" type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="l_wrist_link" class="collision"/> -->
+              <body name="l_hand_link" pos="0 0 -0.12">
+                <site name="l_hand"/>
+              </body>
             </body>
           </body>
         </body>
@@ -175,7 +178,7 @@
           </body>
         </body>
       </body>
-      
+
       <body name="r_shoulder_pitch_link" pos="0 -0.1069 0.117">
         <inertial pos="0.000462 -0.0211803 0.0001949" quat="-0.00394178 0.705746 0.0116892 0.708358" mass="0.108442" diaginertia="0.000103403 8.48155e-05 4.86816e-05"/>
         <joint name="r_shoulder_pitch_joint" pos="0 0 0" axis="0 1 0" range="-4.18 1.04" actuatorfrcrange="-10 10" damping="0.02" class="pi_motor"/>
@@ -198,6 +201,9 @@
               <!-- <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="r_elbow_link" class="collision"/> -->
               <geom pos="0 0 -0.0724" quat="1 0 0 0" type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="r_wrist_link" class="visual"/>
               <!-- <geom pos="0 0 -0.0724" quat="1 0 0 0" type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="r_wrist_link" class="collision"/> -->
+              <body name="r_hand_link" pos="0 0 -0.12">
+                <site name="r_hand"/>
+              </body>
             </body>
           </body>
         </body>
