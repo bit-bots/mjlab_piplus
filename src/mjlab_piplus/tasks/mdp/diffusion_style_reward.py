@@ -106,15 +106,23 @@ Usage
 
 from __future__ import annotations
 
+
+from typing import TYPE_CHECKING
+
 import math
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
+import mujoco
 import torch
 import torch.nn.functional as F
 
 # ── mjlab imports ──────────────────────────────────────────────────────────────
 from mjlab.managers import ManagerTermBase, RewardTermCfg  # type: ignore
+
+if TYPE_CHECKING:
+  from mjlab.envs import ManagerBasedRlEnv
+  from mjlab.entity import Entity
 
 # ── Diffusion model imports (train.py must be importable) ─────────────────────
 from mjlab_piplus.tasks.mdp.diffusion_train_script import (  # type: ignore
@@ -250,9 +258,8 @@ def _build_ee_fix_rotations(device: torch.device) -> Dict[str, torch.Tensor]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _extract_policy_features(
-    env,
-    root_body_id: int,
-    ee_site_ids: Dict[str, int],
+    env: ManagerBasedRlEnv,
+    asset: Entity,
     prev_root_pos:   torch.Tensor,          # (N, 3)  MuJoCo world-space (unscaled)
     prev_root_quat:  torch.Tensor,          # (N, 4)  wxyz, MuJoCo world-space
     inv_scale: float,                       # 1.0 / robot_scale  (e.g. 4.0)
@@ -275,22 +282,24 @@ def _extract_policy_features(
     """
     N = env.num_envs
 
-    # Raw MuJoCo poses (unscaled world-space)
-    xpos  = env.sim.data.xpos    # (N, nbody, 3)
-    xquat = env.sim.data.xquat   # (N, nbody, 4) wxyz
+    # Root pose: bodies use xpos (N, nbody, 3) and xquat (N, nbody, 4) wxyz.
+    root_pos_raw  = asset.data.root_link_pos_w   # (N, 3) unscaled
+    root_quat_raw = asset.data.root_link_quat_w   # (N, 4) wxyz
 
-    root_pos_raw  = xpos[:,  root_body_id, :]   # (N, 3) — keep unscaled for caching
-    root_quat_raw = xquat[:, root_body_id, :]   # (N, 4) wxyz
-
-    # Rotation matrix of the root (same in both spaces — rotations don't scale)
+    # Rotation matrix of the root (scale-invariant)
     R_cur  = _wxyz_quat_to_rotmat(root_quat_raw)    # (N, 3, 3)
     R_prev = _wxyz_quat_to_rotmat(prev_root_quat)   # (N, 3, 3)
+
+    # EE poses: sites use site_xpos (N, nsite, 3) and site_xmat (N, nsite, 9).
+    # site_xmat is stored row-major: reshape (N, nsite, 3, 3).
+    site_xpos = asset.data.site_pos_w                        # (N, nsite, 3)
+    n_site = site_xpos.shape[1]
+    site_xmat = _wxyz_quat_to_rotmat(asset.data.site_quat_w.reshape(-1, 4)).reshape(N, n_site, 3, 3)
 
     # ── feat[0]: absolute Z height, scaled to model space ─────────────────────
     z_height_model = root_pos_raw[:, 2:3] * inv_scale              # (N, 1)
 
     # ── feat[1:4]: root Δpos in prev-root-local frame, scaled ─────────────────
-    # Δpos_world (raw) → express in prev-root-local frame → scale up
     delta_pos_world_raw = root_pos_raw - prev_root_pos              # (N, 3) unscaled
     delta_pos_local_model = torch.bmm(
         R_prev.transpose(1, 2),
@@ -304,15 +313,11 @@ def _extract_policy_features(
 
     # ── feat[10:46]: EE features ──────────────────────────────────────────────
     ee_feats: List[torch.Tensor] = []
-    for key in EE_KEYS:
-        ee_id         = ee_site_ids[key]
-        ee_pos_raw    = xpos[:,  ee_id, :]                          # (N, 3) unscaled
-        ee_quat_world = xquat[:, ee_id, :]                         # (N, 4) wxyz
+    for ee_id, key in enumerate(EE_KEYS):
+        ee_pos_raw = site_xpos[:, ee_id, :]                        # (N, 3) unscaled
+        R_ee_world = site_xmat[:, ee_id, :, :]                     # (N, 3, 3)
 
         # ── EE position: root-local, scaled, + lateral stance shift ───────────
-        # 1. Vector from root to EE in world space (raw)
-        # 2. Rotate into current root-local frame
-        # 3. Scale to model space
         ee_pos_local_model = torch.bmm(
             R_cur.transpose(1, 2),
             (ee_pos_raw - root_pos_raw).unsqueeze(-1),
@@ -325,14 +330,7 @@ def _extract_policy_features(
         ee_pos_local_model[:, 1] = ee_pos_local_model[:, 1] + side * stance_shift
 
         # ── EE orientation: root-local + frame-convention fix ─────────────────
-        # R_ee_local_raw = R_cur^T @ R_ee_world
-        # Then apply the per-EE fix:  R_ee_local_fixed = R_ee_local_raw @ R_fix
-        # This mirrors:  T_eef_world = T_root @ T_eef @ T_fix  in demo.py,
-        # which in rotation-only terms gives:
-        #   R_eef_world_fixed = R_root @ R_eef_local_raw @ R_fix
-        # So in root-local:
-        #   R_eef_local_fixed = R_eef_local_raw @ R_fix
-        R_ee_world = _wxyz_quat_to_rotmat(ee_quat_world)           # (N, 3, 3)
+        # R_ee_local_raw = R_cur^T @ R_ee_world  (R_ee_world already from site_xmat)
         R_ee_local_raw = torch.bmm(
             R_cur.transpose(1, 2), R_ee_world)                     # (N, 3, 3)
 
@@ -463,27 +461,20 @@ def _score_trajectory_chunk(
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DiffusionStyleReward(ManagerTermBase):
-    """
-    mjlab reward term: motion-diffusion style critic.
-
-    See module docstring for full description of the scale bridge, frame-
-    convention fix, and fill/score/halve buffer strategy.
-    """
-
-    def __init__(self, cfg: RewardTermCfg, env) -> None:
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
         super().__init__(env)
         p = cfg.params
 
         # ── scale & frame convention ──────────────────────────────────────────
-        self._inv_scale:    float = 1.0 / float(p.get("robot_scale",  0.25))
-        self._stance_shift: float = float(p.get("stance_shift", 0.2))
+        self._inv_scale:    float = 1.0 / float(p["robot_scale"])
+        self._stance_shift: float = float(p["stance_shift"])
 
         # Pre-build fix rotations for this device
         self._ee_fix_rots: Dict[str, torch.Tensor] = _build_ee_fix_rotations(self.device)
 
         # ── noise schedule ────────────────────────────────────────────────────
-        self._noise_levels:  Tuple[float, ...] = tuple(p.get("noise_levels",  (0.1, 0.3, 0.7)))
-        self._level_weights: Tuple[float, ...] = tuple(p.get("level_weights", (0.5, 0.3, 0.2)))
+        self._noise_levels:  Tuple[float, ...] = tuple(p["noise_levels"])
+        self._level_weights: Tuple[float, ...] = tuple(p["level_weights"])
         assert len(self._noise_levels) == len(self._level_weights)
         assert abs(sum(self._level_weights) - 1.0) < 1e-5, "level_weights must sum to 1"
 
@@ -496,33 +487,10 @@ class DiffusionStyleReward(ManagerTermBase):
         self._scale_hand_rot:       float = float(p.get("scale_hand_rot",       1.0))
 
         # ── reward shaping ────────────────────────────────────────────────────
-        self._reward_scale: float = float(p.get("reward_scale", 5.0))
+        self._reward_scale: float = float(p.get("reward_scale", 1.0))
+        self._reward_beta: float = float(p.get("reward_beta", 0.5))
 
-        # ── body / site ID resolution ─────────────────────────────────────────
-        # Root is a body; EEs are sites named l_foot, r_foot, l_hand, r_hand.
-        body_names = list(env.sim.model.body_names)
-        site_names = list(env.sim.model.site_names)
-
-        def _body_id(name: str) -> int:
-            if name not in body_names:
-                raise ValueError(
-                    f"DiffusionStyleReward: body '{name}' not found. "
-                    f"Available: {body_names}"
-                )
-            return body_names.index(name)
-
-        def _site_id(name: str) -> int:
-            if name not in site_names:
-                raise ValueError(
-                    f"DiffusionStyleReward: site '{name}' not found. "
-                    f"Available: {site_names}"
-                )
-            return site_names.index(name)
-
-        self._root_body_id: int = _body_id(p["root_body_name"])
-
-        # EE sites: MuJoCo site names == EE_KEYS (l_foot, r_foot, l_hand, r_hand)
-        self._ee_site_ids: Dict[str, int] = {key: _site_id(key) for key in EE_KEYS}
+        self.asset: Entity = env.scene[cfg.params["asset_cfg"].name]
 
         # ── load diffusion checkpoint ─────────────────────────────────────────
         ckpt_path = Path(p["checkpoint_path"])
@@ -583,6 +551,8 @@ class DiffusionStyleReward(ManagerTermBase):
             N_envs, 4, dtype=torch.float32, device=self.device)
         self._prev_root_quat[:, 0] = 1.0   # identity quaternion (w=1)
 
+        print(f"[DiffusionStyleReward] Buffers initialised: buf={self._buf.shape} ptr={self._ptr.shape} prev_root_pos={self._prev_root_pos.shape} prev_root_quat={self._prev_root_quat.shape}")
+
     # ── mjlab hooks ───────────────────────────────────────────────────────────
 
     def reset(self, env_ids: torch.Tensor) -> None:
@@ -591,10 +561,8 @@ class DiffusionStyleReward(ManagerTermBase):
         self._ptr[env_ids] = 0
 
         # Seed previous root pose from the freshly-reset sim state
-        xpos  = self.env.sim.data.xpos
-        xquat = self.env.sim.data.xquat
-        self._prev_root_pos[env_ids]  = xpos[ env_ids, self._root_body_id, :].detach().clone()
-        self._prev_root_quat[env_ids] = xquat[env_ids, self._root_body_id, :].detach().clone()
+        self._prev_root_pos[env_ids] = self.asset.data.root_link_pos_w[env_ids].detach().clone()
+        self._prev_root_quat[env_ids] = self.asset.data.root_link_quat_w[env_ids].detach().clone()
 
     def __call__(self, env, **kwargs) -> torch.Tensor:
         """
@@ -609,8 +577,7 @@ class DiffusionStyleReward(ManagerTermBase):
         # ── 1. Extract model-space features ───────────────────────────────────
         feat, self._prev_root_pos, self._prev_root_quat = _extract_policy_features(
             env,
-            self._root_body_id,
-            self._ee_site_ids,
+            self.asset,
             self._prev_root_pos,
             self._prev_root_quat,
             inv_scale=self._inv_scale,
@@ -639,6 +606,8 @@ class DiffusionStyleReward(ManagerTermBase):
                 * 2.0 - 1.0
             )
 
+            print(f"[DiffusionStyleReward] Scoring {len(full_idx)} envs at indices {full_idx.cpu().tolist()}")
+
             error = _score_trajectory_chunk(
                 traj_norm,
                 self._model,
@@ -654,7 +623,9 @@ class DiffusionStyleReward(ManagerTermBase):
                 device=self.device,
             )   # (V,)
 
-            reward[full_idx] = torch.exp(-self._reward_scale * error)
+            reward[full_idx] = torch.exp(-self._reward_beta * error) * self._reward_scale
+
+            print(f"[DiffusionStyleReward] Rewards for scored envs: {reward[full_idx].cpu().tolist()}")
 
             # ── 5. Keep second half as context seed, reset pointer ─────────────
             # buf[:, :half]  ← buf[:, half:T]   (recent context carried forward)

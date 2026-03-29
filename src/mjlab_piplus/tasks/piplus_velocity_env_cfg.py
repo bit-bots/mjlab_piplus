@@ -298,8 +298,8 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
         func=DiffusionStyleReward,
         weight=1.0,
         params=dict(
+            asset_cfg=SceneEntityCfg("robot", site_names=["l_foot", "r_foot", "l_hand", "r_hand"], body_names=("base_link",)),
             checkpoint_path="/homes/17vahl/mjlab_piplus/epoch_0500.pt",
-            root_body_name="base_link",        # body name in your MJCF
             robot_scale=0.25,               # your robot's size relative to training data
             stance_shift=0.2,               # lateral EE offset in model-space metres
             noise_levels=(0.1, 0.3, 0.7),
@@ -311,7 +311,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
             scale_foot_rot=0.5,
             scale_hand_trans=1.0,
             scale_hand_rot=0.5,
-            reward_scale=50.0,
+            reward_scale=100.0,
         ),
     )
   }
