@@ -30,7 +30,6 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg
 
 def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> ManagerBasedRlEnvCfg:
   foot_sites = ("l_foot", "r_foot")
-  #foot_geoms = ("l_foot00", "r_foot00")
 
   ##
   # Observations
@@ -198,17 +197,17 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "body_ang_vel": RewardTermCfg(
       func=mdp.body_angular_velocity_penalty,
-      weight=-0.05,  # Override per-robot
+      weight=-0.0,  # Override per-robot
       params={"asset_cfg": SceneEntityCfg("robot", body_names=("base_link",))},
     ),
     "angular_momentum": RewardTermCfg(
       func=mdp.angular_momentum_penalty,
-      weight=-0.02,
+      weight=-0.0,
       params={"sensor_name": "robot/root_angmom"},
     ),
     "pose": RewardTermCfg(
       func=mdp.variable_posture,
-      weight=1.0,
+      weight=0.0,
       params={
         "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
         "command_name": "twist",
@@ -241,11 +240,11 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
         "running_threshold": 1.5,
       },
     ),
-    "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
+    "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-0.4),
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
     "air_time": RewardTermCfg(
       func=mdp.feet_air_time,
-      weight=0.25,
+      weight=0.0,
       params={
         "sensor_name": "feet_ground_contact",
         "threshold_min": 0.05,
@@ -256,9 +255,9 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "foot_clearance": RewardTermCfg(
       func=mdp.feet_clearance,
-      weight=-2.0,
+      weight=-0.0,
       params={
-        "target_height": 0.05,
+        "target_height": 0.1,
         "command_name": "twist",
         "command_threshold": 0.05,
         "asset_cfg": SceneEntityCfg("robot", site_names=foot_sites),
@@ -266,10 +265,10 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "foot_swing_height": RewardTermCfg(
       func=mdp.feet_swing_height,
-      weight=-0.5,
+      weight=-0.0,
       params={
         "sensor_name": "feet_ground_contact",
-        "target_height": 0.1,
+        "target_height": 0.13,
         "command_name": "twist",
         "command_threshold": 0.05,
         "asset_cfg": SceneEntityCfg("robot", site_names=foot_sites),
@@ -296,22 +295,22 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "diffusion_style": RewardTermCfg(
         func=DiffusionStyleReward,
-        weight=1.0,
+        weight=1500.0,
         params=dict(
             asset_cfg=SceneEntityCfg("robot", site_names=["l_foot", "r_foot", "l_hand", "r_hand"], body_names=("base_link",)),
             checkpoint_path="/homes/17vahl/mjlab_piplus/epoch_0500.pt",
             robot_scale=0.25,               # your robot's size relative to training data
-            stance_shift=0.2,               # lateral EE offset in model-space metres
-            noise_levels=(0.1, 0.3, 0.7),
-            level_weights=(0.5, 0.3, 0.2),
+            stance_shift=0.1,               # lateral EE offset in model-space metres
+            noise_levels=(0.1, 0.7, 0.95),
+            level_weights=(0.3, 0.3, 0.4),
             # tune these to balance style components:
-            scale_root_vel_trans=1.0,
-            scale_root_vel_rot=1.0,
+            scale_root_vel_trans=0.0,
+            scale_root_vel_rot=0.5,
             scale_foot_trans=1.0,
             scale_foot_rot=0.5,
             scale_hand_trans=1.0,
             scale_hand_rot=0.5,
-            reward_scale=100.0,
+            reward_scale=300.0,
         ),
     )
   }
@@ -337,11 +336,23 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
            "velocity_stages": [
            {"step": 0, "lin_vel_x": (0.0, 0.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
            {"step": 200 * 24, "lin_vel_x": (-0.25, 0.25), "lin_vel_y": (-0.1, 0.1), "ang_vel_z": (-0.5, 0.5)},
-           {"step": 800 * 24, "lin_vel_x": (-0.75, 0.75), "lin_vel_y": (-0.4, 0.4), "ang_vel_z": (-1.0, 1.0)},
-           {"step": 1200 * 24, "lin_vel_x": (-1.5, 1.5), "lin_vel_y": (-0.75, 0.75), "ang_vel_z": (-1.5, 1.5)},
+           {"step": 8000 * 24, "lin_vel_x": (-0.75, 0.75), "lin_vel_y": (-0.4, 0.4), "ang_vel_z": (-1.0, 1.0)},
+           {"step": 12000 * 24, "lin_vel_x": (-1.5, 1.5), "lin_vel_y": (-0.75, 0.75), "ang_vel_z": (-1.5, 1.5)},
            ],
        },
    ),
+    "upright_weight": CurriculumTermCfg(
+    func=mdp.reward_curriculum,
+    params={
+        "reward_name": "upright",
+        "stages": [
+            {"step": 0, "weight": 1.0},
+            {"step": 500 * 24, "weight": 0.5},
+            {"step": 1400 * 24, "weight": 0.05},
+        ],
+    },
+  ),
+
   }
 
   ##

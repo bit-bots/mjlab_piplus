@@ -124,6 +124,10 @@ if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.entity import Entity
 
+from kornia.geometry.conversions import quaternion_to_rotation_matrix, axis_angle_to_rotation_matrix, Rt_to_matrix4x4
+from kornia.geometry.linalg import relative_transformation
+
+
 # ── Diffusion model imports (train.py must be importable) ─────────────────────
 from mjlab_piplus.tasks.mdp.diffusion_train_script import (  # type: ignore
     Config as DiffusionConfig,
@@ -258,14 +262,11 @@ def _build_ee_fix_rotations(device: torch.device) -> Dict[str, torch.Tensor]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _extract_policy_features(
-    env: ManagerBasedRlEnv,
     asset: Entity,
-    prev_root_pos:   torch.Tensor,          # (N, 3)  MuJoCo world-space (unscaled)
-    prev_root_quat:  torch.Tensor,          # (N, 4)  wxyz, MuJoCo world-space
+    T_root_prev:   torch.Tensor,          # (N, 4, 4)  MuJoCo world-space (unscaled)
     inv_scale: float,                       # 1.0 / robot_scale  (e.g. 4.0)
     stance_shift: float,                    # lateral offset in model-space metres
-    ee_fix_rots: Dict[str, torch.Tensor],   # pre-built per-EE fix rotations
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Build the 46-dim feature vector (in model/training space) from sim state.
 
@@ -277,82 +278,80 @@ def _extract_policy_features(
     Returns
     -------
     feat            : (N_env, 46)  in model space, ready for normalisation
-    new_root_pos    : (N_env, 3)   raw MuJoCo world-space pos (cache for next step)
-    new_root_quat   : (N_env, 4)   raw MuJoCo world-space quat wxyz (cache)
+    current_root_transform  : (N_env, 4, 4)  raw MuJoCo world-space (unscaled)
     """
-    N = env.num_envs
+    N_envs = T_root_prev.shape[0]
 
-    # Root pose: bodies use xpos (N, nbody, 3) and xquat (N, nbody, 4) wxyz.
-    root_pos_raw  = asset.data.root_link_pos_w   # (N, 3) unscaled
-    root_quat_raw = asset.data.root_link_quat_w   # (N, 4) wxyz
+    # Root pose
+    T_root_now = Rt_to_matrix4x4(
+        quaternion_to_rotation_matrix(asset.data.root_link_quat_w),
+        asset.data.root_link_pos_w.unsqueeze(-1)
+    )  # (N, 4, 4)
 
-    # Rotation matrix of the root (scale-invariant)
-    R_cur  = _wxyz_quat_to_rotmat(root_quat_raw)    # (N, 3, 3)
-    R_prev = _wxyz_quat_to_rotmat(prev_root_quat)   # (N, 3, 3)
-
-    # EE poses: sites use site_xpos (N, nsite, 3) and site_xmat (N, nsite, 9).
-    # site_xmat is stored row-major: reshape (N, nsite, 3, 3).
-    site_xpos = asset.data.site_pos_w                        # (N, nsite, 3)
-    n_site = site_xpos.shape[1]
-    site_xmat = _wxyz_quat_to_rotmat(asset.data.site_quat_w.reshape(-1, 4)).reshape(N, n_site, 3, 3)
+    # EE pose
+    T_sites = Rt_to_matrix4x4(
+        quaternion_to_rotation_matrix(asset.data.site_quat_w).reshape(-1, 3, 3),
+        asset.data.site_pos_w.reshape(-1, 3, 1)
+    ).reshape(N_envs, -1, 4, 4)  # (N, nsite, 4, 4)
 
     # ── feat[0]: absolute Z height, scaled to model space ─────────────────────
-    z_height_model = root_pos_raw[:, 2:3] * inv_scale              # (N, 1)
+    z_height_model = T_root_now[:, 2, 3].unsqueeze(-1) * inv_scale   # (N,)
 
     # ── feat[1:4]: root Δpos in prev-root-local frame, scaled ─────────────────
-    delta_pos_world_raw = root_pos_raw - prev_root_pos              # (N, 3) unscaled
-    delta_pos_local_model = torch.bmm(
-        R_prev.transpose(1, 2),
-        delta_pos_world_raw.unsqueeze(-1),
-    ).squeeze(-1) * inv_scale                                       # (N, 3)
+    T_root_delta = relative_transformation(T_root_prev, T_root_now)  # (N, 4, 4)
 
-    # ── feat[4:10]: root Δrot 6D (rotation is scale-invariant) ───────────────
-    R_delta = torch.bmm(R_prev.transpose(1, 2), R_cur)             # (N, 3, 3)
-    rot6d_root = torch.cat(
-        [R_delta[:, :, 0], R_delta[:, :, 1]], dim=-1)               # (N, 6)
+    rot6d_root_delta = torch.cat(
+            [T_root_delta[:, :3, 0],
+             T_root_delta[:, :3, 1]], dim=-1)  # (N, 6)
+    delta_pos_local = T_root_delta[:, :3, 3] * inv_scale   # (N, 3)
+
+    site_name_id_map = {name: i for i, name in enumerate(asset.site_names)}
 
     # ── feat[10:46]: EE features ──────────────────────────────────────────────
     ee_feats: List[torch.Tensor] = []
-    for ee_id, key in enumerate(EE_KEYS):
-        ee_pos_raw = site_xpos[:, ee_id, :]                        # (N, 3) unscaled
-        R_ee_world = site_xmat[:, ee_id, :, :]                     # (N, 3, 3)
+    for key in EE_KEYS:
+        T_ee = T_sites[:, site_name_id_map[key], :, :]                        # (N, 4, 4)
+
+        T_ee_relative = relative_transformation(T_root_now, T_ee)  # (N, 4, 4)
+
+        #print(f"[DiffusionStyleReward] Raw EE pos for {key}: {T_ee[0]}, Relative to root: {T_ee_relative[0]}")
 
         # ── EE position: root-local, scaled, + lateral stance shift ───────────
-        ee_pos_local_model = torch.bmm(
-            R_cur.transpose(1, 2),
-            (ee_pos_raw - root_pos_raw).unsqueeze(-1),
-        ).squeeze(-1) * inv_scale                                   # (N, 3)
 
-        # Apply stance shift: shift EE along root-local Y axis.
-        # Right EEs shift +Y, left EEs shift −Y (matches demo.py stance logic).
         side = 1.0 if key.startswith("r_") else -1.0
-        ee_pos_local_model = ee_pos_local_model.clone()
-        ee_pos_local_model[:, 1] = ee_pos_local_model[:, 1] + side * stance_shift
 
-        # ── EE orientation: root-local + frame-convention fix ─────────────────
-        # R_ee_local_raw = R_cur^T @ R_ee_world  (R_ee_world already from site_xmat)
-        R_ee_local_raw = torch.bmm(
-            R_cur.transpose(1, 2), R_ee_world)                     # (N, 3, 3)
+        magnitude = -20 if key in _FOOT_KEYS else -90
 
-        R_fix = ee_fix_rots[key]                                    # (3, 3)
-        # Broadcast R_fix across the batch
-        R_ee_local_fixed = torch.bmm(
-            R_ee_local_raw,
-            R_fix.unsqueeze(0).expand(N, -1, -1),
-        )                                                           # (N, 3, 3)
+        T_side = torch.eye(4, device=T_ee.device)
+        T_side[1, 3] = side * (stance_shift / inv_scale)
+
+        T_fix = Rt_to_matrix4x4(
+            axis_angle_to_rotation_matrix(   # TODO precompute these
+                torch.tensor(
+                    [[
+                        -math.radians(side * magnitude),
+                        0.0,
+                        0.0
+                    ]],
+                    device=T_ee.device)),
+            torch.zeros((1, 3, 1), device=T_ee.device)
+        )
+        T_ee_fixed = T_ee_relative @ T_side @ T_fix
+
+        ee_pos_local = T_ee_fixed[:, :3, 3] * inv_scale   # (N, 3)
 
         rot6d_ee = torch.cat(
-            [R_ee_local_fixed[:, :, 0],
-             R_ee_local_fixed[:, :, 1]], dim=-1)                   # (N, 6)
+            [T_ee_fixed[:, :3, 0],
+             T_ee_fixed[:, :3, 1]], dim=-1)  # (N, 6)
 
-        ee_feats.extend([ee_pos_local_model, rot6d_ee])
+        ee_feats.extend([ee_pos_local, rot6d_ee])
 
     feat = torch.cat(
-        [z_height_model, delta_pos_local_model, rot6d_root, *ee_feats],
+        [z_height_model, delta_pos_local, rot6d_root_delta, *ee_feats],
         dim=-1,
     )   # (N, 46)
 
-    return feat, root_pos_raw.detach().clone(), root_quat_raw.detach().clone()
+    return feat, T_root_now.detach().clone()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -379,11 +378,6 @@ def _score_trajectory_chunk(
     """
     N, T, _ = feat_chunk.shape
     total_error = torch.zeros(N, device=device)
-
-    ee_col     = {key: 10 + k * 9 for k, key in enumerate(EE_KEYS)}
-    foot_keys  = [k for k in EE_KEYS if k in _FOOT_KEYS]
-    hand_keys  = [k for k in EE_KEYS if k in _HAND_KEYS]
-
     with torch.no_grad():
         for alpha, lw in zip(noise_levels, level_weights):
             # Nearest DDPM timestep whose ᾱₜ ≈ alpha
@@ -392,66 +386,84 @@ def _score_trajectory_chunk(
             )
             t_tensor = torch.full((N,), t_idx, dtype=torch.long, device=device)
 
+            #print(f"[DiffusionStyleReward] Noise level {alpha:.2f} (t={t_idx}), weight {lw:.2f}")
+
             # Forward noise (single step — no iteration)
             eps     = torch.randn_like(feat_chunk)
             x_noisy = math.sqrt(alpha) * feat_chunk + math.sqrt(1.0 - alpha) * eps
 
             # Single denoiser pass → predicted clean trajectory
-            x_hat = model(x_noisy, t_tensor)    # (N, T, 46)
-            delta = x_hat - feat_chunk           # (N, T, 46)
+            noise_estimate = model(x_noisy, t_tensor)    # (N, T, 46)
 
-            # ── root velocity translation (feat[:,1:4]) ────────────────────────
-            err_root_trans = delta[:, :, 1:4].norm(dim=-1).mean(dim=-1)    # (N,)
+            delta = noise_estimate - eps           # (N, T, 46)
 
-            # ── root velocity rotation (feat[:,4:10] as 6D) ───────────────────
-            q_o_root = _rot6d_to_quat(feat_chunk[:, :, 4:10].reshape(N*T, 6)).reshape(N, T, 4)
-            q_h_root = _rot6d_to_quat(x_hat[:,     :, 4:10].reshape(N*T, 6)).reshape(N, T, 4)
-            err_root_rot = _quat_angle_diff(
-                q_o_root.reshape(N*T, 4), q_h_root.reshape(N*T, 4)
-            ).reshape(N, T).mean(dim=-1)                                    # (N,)
+            #print(f"[DiffusionStyleReward]   x hat: {x_hat[...,50,:4]}  state chunk: {feat_chunk[...,50,:4]}  noise level: {alpha:.2f}")
 
-            # ── foot errors ───────────────────────────────────────────────────
-            err_foot_trans = torch.zeros(N, device=device)
-            err_foot_rot   = torch.zeros(N, device=device)
-            for key in foot_keys:
-                col = ee_col[key]
-                err_foot_trans += delta[:, :, col:col+3].norm(dim=-1).mean(dim=-1)
-                q_o = _rot6d_to_quat(feat_chunk[:, :, col+3:col+9].reshape(N*T, 6)).reshape(N, T, 4)
-                q_h = _rot6d_to_quat(x_hat[:,     :, col+3:col+9].reshape(N*T, 6)).reshape(N, T, 4)
-                err_foot_rot += _quat_angle_diff(
-                    q_o.reshape(N*T, 4), q_h.reshape(N*T, 4)
-                ).reshape(N, T).mean(-1)
-            if foot_keys:
-                err_foot_trans /= len(foot_keys)
-                err_foot_rot   /= len(foot_keys)
+            combined = torch.square(delta).mean(dim=(1, 2))   # (N,)
 
-            # ── hand errors ───────────────────────────────────────────────────
-            err_hand_trans = torch.zeros(N, device=device)
-            err_hand_rot   = torch.zeros(N, device=device)
-            for key in hand_keys:
-                col = ee_col[key]
-                err_hand_trans += delta[:, :, col:col+3].norm(dim=-1).mean(dim=-1)
-                q_o = _rot6d_to_quat(feat_chunk[:, :, col+3:col+9].reshape(N*T, 6)).reshape(N, T, 4)
-                q_h = _rot6d_to_quat(x_hat[:,     :, col+3:col+9].reshape(N*T, 6)).reshape(N, T, 4)
-                err_hand_rot += _quat_angle_diff(
-                    q_o.reshape(N*T, 4), q_h.reshape(N*T, 4)
-                ).reshape(N, T).mean(-1)
-            if hand_keys:
-                err_hand_trans /= len(hand_keys)
-                err_hand_rot   /= len(hand_keys)
+            # # ── root velocity translation (feat[:,1:4]) ────────────────────────
+            # err_root_trans = delta[:, :, 1:4].norm(dim=-1).mean(dim=-1)    # (N,)
 
-            # ── weighted combination ──────────────────────────────────────────
-            # Rotation errors ∈ [0, π]; divide by π → [0, 1] to match
-            # magnitude of translation errors (in model-space metres).
-            combined = (
-                scale_root_vel_trans * err_root_trans
-                + scale_root_vel_rot  * err_root_rot  / math.pi
-                + scale_foot_trans    * err_foot_trans
-                + scale_foot_rot      * err_foot_rot  / math.pi
-                + scale_hand_trans    * err_hand_trans
-                + scale_hand_rot      * err_hand_rot  / math.pi
-            )
-            total_error = total_error + lw * combined
+            # # ── root velocity rotation (feat[:,4:10] as 6D) ───────────────────
+            # q_o_root = _rot6d_to_quat(feat_chunk[:, :, 4:10].reshape(N*T, 6)).reshape(N, T, 4)
+            # q_h_root = _rot6d_to_quat(x_hat[:,     :, 4:10].reshape(N*T, 6)).reshape(N, T, 4)
+            # err_root_rot = _quat_angle_diff(
+            #     q_o_root.reshape(N*T, 4), q_h_root.reshape(N*T, 4)
+            # ).reshape(N, T).mean(dim=-1)                                    # (N,)
+
+            # # ── foot errors ───────────────────────────────────────────────────
+            # err_foot_trans = torch.zeros(N, device=device)
+            # err_foot_rot   = torch.zeros(N, device=device)
+            # for key in foot_keys:
+            #     col = ee_col[key]
+            #     err_foot_trans += delta[:, :, col:col+3].norm(dim=-1).mean(dim=-1)
+            #     q_o = _rot6d_to_quat(feat_chunk[:, :, col+3:col+9].reshape(N*T, 6)).reshape(N, T, 4)
+            #     q_h = _rot6d_to_quat(x_hat[:,     :, col+3:col+9].reshape(N*T, 6)).reshape(N, T, 4)
+            #     err_foot_rot += _quat_angle_diff(
+            #         q_o.reshape(N*T, 4), q_h.reshape(N*T, 4)
+            #     ).reshape(N, T).mean(-1)
+            # if foot_keys:
+            #     err_foot_trans /= len(foot_keys)
+            #     err_foot_rot   /= len(foot_keys)
+
+            # # ── hand errors ───────────────────────────────────────────────────
+            # err_hand_trans = torch.zeros(N, device=device)
+            # err_hand_rot   = torch.zeros(N, device=device)
+            # for key in hand_keys:
+            #     col = ee_col[key]
+            #     err_hand_trans += delta[:, :, col:col+3].norm(dim=-1).mean(dim=-1)
+            #     q_o = _rot6d_to_quat(feat_chunk[:, :, col+3:col+9].reshape(N*T, 6)).reshape(N, T, 4)
+            #     q_h = _rot6d_to_quat(x_hat[:,     :, col+3:col+9].reshape(N*T, 6)).reshape(N, T, 4)
+            #     err_hand_rot += _quat_angle_diff(
+            #         q_o.reshape(N*T, 4), q_h.reshape(N*T, 4)
+            #     ).reshape(N, T).mean(-1)
+            # if hand_keys:
+            #     err_hand_trans /= len(hand_keys)
+            #     err_hand_rot   /= len(hand_keys)
+
+            # print(f"[DiffusionStyleReward]   Errors at alpha={alpha:.2f}: "
+            #       f"{err_root_trans[0]=}\n"
+            #       f"{err_root_rot[0]=}\n"
+            #       f"{err_foot_trans[0]=}\n"
+            #       f"{err_foot_rot[0]=}\n"
+            #       f"{err_hand_trans[0]=}\n"
+            #       f"{err_hand_rot[0]=}")
+
+            # # ── weighted combination ──────────────────────────────────────────
+            # # Rotation errors ∈ [0, π]; divide by π → [0, 1] to match
+            # # magnitude of translation errors (in model-space metres).
+            # combined = (
+            #     scale_root_vel_trans * err_root_trans
+            #     + scale_root_vel_rot  * err_root_rot  / math.pi
+            #     + scale_foot_trans    * err_foot_trans
+            #     + scale_foot_rot      * err_foot_rot  / math.pi
+            #     + scale_hand_trans    * err_hand_trans
+            #     + scale_hand_rot      * err_hand_rot  / math.pi
+            # )
+
+            print(f"[DiffusionStyleReward]   Combined error at alpha={alpha:.2f}: {combined[0]=}")
+
+            total_error += lw * combined
 
     return total_error   # (N,)
 
@@ -543,15 +555,12 @@ class DiffusionStyleReward(ManagerTermBase):
             N_envs, dtype=torch.long, device=self.device)
 
         # Previous root pose stored in raw MuJoCo world-space (unscaled),
-        # because xpos is unscaled and we need raw Δpos to be correct before
-        # applying inv_scale inside _extract_policy_features.
-        self._prev_root_pos:  torch.Tensor = torch.zeros(
-            N_envs, 3, dtype=torch.float32, device=self.device)
-        self._prev_root_quat: torch.Tensor = torch.zeros(
-            N_envs, 4, dtype=torch.float32, device=self.device)
-        self._prev_root_quat[:, 0] = 1.0   # identity quaternion (w=1)
+        self._prev_root:  torch.Tensor = Rt_to_matrix4x4(
+            quaternion_to_rotation_matrix(self.asset.data.root_link_quat_w),
+            self.asset.data.root_link_pos_w.unsqueeze(-1)
+        ).detach().clone()
 
-        print(f"[DiffusionStyleReward] Buffers initialised: buf={self._buf.shape} ptr={self._ptr.shape} prev_root_pos={self._prev_root_pos.shape} prev_root_quat={self._prev_root_quat.shape}")
+        #print(f"[DiffusionStyleReward] Buffers initialised: buf={self._buf.shape} ptr={self._ptr.shape} prev_root={self._prev_root}")
 
     # ── mjlab hooks ───────────────────────────────────────────────────────────
 
@@ -561,8 +570,10 @@ class DiffusionStyleReward(ManagerTermBase):
         self._ptr[env_ids] = 0
 
         # Seed previous root pose from the freshly-reset sim state
-        self._prev_root_pos[env_ids] = self.asset.data.root_link_pos_w[env_ids].detach().clone()
-        self._prev_root_quat[env_ids] = self.asset.data.root_link_quat_w[env_ids].detach().clone()
+        self._prev_root[env_ids] = Rt_to_matrix4x4(
+            quaternion_to_rotation_matrix(self.asset.data.root_link_quat_w[env_ids]),
+            self.asset.data.root_link_pos_w[env_ids].unsqueeze(-1)
+        ).detach().clone()
 
     def __call__(self, env, **kwargs) -> torch.Tensor:
         """
@@ -575,15 +586,17 @@ class DiffusionStyleReward(ManagerTermBase):
         N = env.num_envs
 
         # ── 1. Extract model-space features ───────────────────────────────────
-        feat, self._prev_root_pos, self._prev_root_quat = _extract_policy_features(
-            env,
+        feat, self._prev_root = _extract_policy_features(
             self.asset,
-            self._prev_root_pos,
-            self._prev_root_quat,
+            self._prev_root,
             inv_scale=self._inv_scale,
             stance_shift=self._stance_shift,
-            ee_fix_rots=self._ee_fix_rots,
         )   # (N, 46)  in model space
+
+        k = 1
+        fi = 1 + k * 9   # index into feat
+
+        #print(f"[DiffusionStyleReward] Extracted features for {N} envs: {feat.shape}  sample: {feat[0,fi:fi+9]}")
 
         # ── 2. Scatter-write into buffer (vectorised, no loop) ─────────────────
         env_idx = torch.arange(N, device=self.device)
@@ -606,7 +619,7 @@ class DiffusionStyleReward(ManagerTermBase):
                 * 2.0 - 1.0
             )
 
-            print(f"[DiffusionStyleReward] Scoring {len(full_idx)} envs at indices {full_idx.cpu().tolist()}")
+            #print(f"[DiffusionStyleReward] Scoring {len(full_idx)} envs at indices {full_idx.cpu().tolist()}")
 
             error = _score_trajectory_chunk(
                 traj_norm,
@@ -623,9 +636,9 @@ class DiffusionStyleReward(ManagerTermBase):
                 device=self.device,
             )   # (V,)
 
-            reward[full_idx] = torch.exp(-self._reward_beta * error) * self._reward_scale
+            reward[full_idx] = -error
 
-            print(f"[DiffusionStyleReward] Rewards for scored envs: {reward[full_idx].cpu().tolist()}")
+            #print(f"[DiffusionStyleReward] Rewards for scored envs: {reward[full_idx].cpu().tolist()}")
 
             # ── 5. Keep second half as context seed, reset pointer ─────────────
             # buf[:, :half]  ← buf[:, half:T]   (recent context carried forward)
