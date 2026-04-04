@@ -1,5 +1,6 @@
 from copy import deepcopy
 import math
+import torch
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -18,15 +19,18 @@ from mjlab.scene import SceneCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
+from mjlab.envs.mdp import events as event_fns, dr
 from mjlab.tasks.velocity import mdp
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 from mjlab_piplus.robot.piplus_constants import get_piplus_robot_cfg
-from mjlab_piplus.tasks.mdp.diffusion_style_reward import DiffusionStyleReward
+from mjlab_piplus.tasks.mdp.phase import Phase, PhaseCommandTermCfg
 
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
+
+
 
 def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> ManagerBasedRlEnvCfg:
   foot_sites = ("l_foot", "r_foot")
@@ -61,6 +65,10 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     "command": ObservationTermCfg(
     func=mdp.generated_commands,
     params={"command_name": "twist"},
+    ),
+    "phase": ObservationTermCfg(
+    func=mdp.generated_commands,
+    params={"command_name": "phase"},
     ),
   }
   critic_terms = {
@@ -114,20 +122,23 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
 
   commands: dict[str, CommandTermCfg] = {
     "twist": UniformVelocityCommandCfg(
-    entity_name="robot",
-    resampling_time_range=(3.0, 8.0),
-    rel_standing_envs=0.1,
-    rel_heading_envs=0.3,
-    heading_command=False,
-    heading_control_stiffness=0.0,
-    debug_vis=True,
-    ranges=UniformVelocityCommandCfg.Ranges(
-      lin_vel_x=(-1.0, 1.0),
-      lin_vel_y=(-1.0, 1.0),
-      ang_vel_z=(-0.5, 0.5),
-      heading=None,
+      entity_name="robot",
+      resampling_time_range=(3.0, 8.0),
+      rel_standing_envs=0.1,
+      rel_heading_envs=0.3,
+      heading_command=False,
+      heading_control_stiffness=0.0,
+      debug_vis=True,
+      ranges=UniformVelocityCommandCfg.Ranges(
+        lin_vel_x=(-1.0, 1.0),
+        lin_vel_y=(-1.0, 1.0),
+        ang_vel_z=(-0.5, 0.5),
+        heading=None,
+      ),
     ),
-    )
+    "phase": PhaseCommandTermCfg(
+      frequency=2.0
+    ),
   }
   ##
   # Events
@@ -171,6 +182,18 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
         },
       },
     ),
+    "impulse": EventTermCfg(
+        func=event_fns.apply_body_impulse,
+        mode="step",
+        params={
+            "force_range": (-80.0, 80.0),
+            "torque_range": (0.0, 0.0),
+            "duration_s": (0.1, 0.2),
+            "cooldown_s": (1.0, 5.0),
+            "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
+        },
+    ),
+
   }
 
   ##
@@ -179,12 +202,12 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
   rewards = {
     "track_linear_velocity": RewardTermCfg(
       func=mdp.track_linear_velocity,
-      weight=2.0,
+      weight=3.0,
       params={"command_name": "twist", "std": math.sqrt(0.25)},
     ),
     "track_angular_velocity": RewardTermCfg(
       func=mdp.track_angular_velocity,
-      weight=2.0,
+      weight=1.0,
       params={"command_name": "twist", "std": math.sqrt(0.5)},
     ),
     "upright": RewardTermCfg(
@@ -197,54 +220,55 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "body_ang_vel": RewardTermCfg(
       func=mdp.body_angular_velocity_penalty,
-      weight=-0.0,  # Override per-robot
+      weight=-0.3,  # Override per-robot
       params={"asset_cfg": SceneEntityCfg("robot", body_names=("base_link",))},
     ),
     "angular_momentum": RewardTermCfg(
       func=mdp.angular_momentum_penalty,
-      weight=-0.0,
+      weight=-0.00,
       params={"sensor_name": "robot/root_angmom"},
     ),
     "pose": RewardTermCfg(
       func=mdp.variable_posture,
-      weight=0.0,
+      weight=1.0,
       params={
         "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
         "command_name": "twist",
-        "std_standing": {".*": 0.05},  # Set per-robot.
+        "std_standing": {".*": 0.5},  # Set per-robot.
         "std_walking": {
-          r".*_hip_pitch_joint": 0.3,
-          r".*_hip_roll_joint": 0.15,
-          r".*_thigh_joint": 0.15,
-          r".*_calf_joint": 0.35,
-          r".*_ankle_pitch_joint": 0.25,
-          r".*_ankle_roll_joint": 0.1,
-          r".*_shoulder_roll_joint": 0.15,
+          r".*_hip_pitch_joint": 0.2,
+          r".*_hip_roll_joint": 0.6,
+          r".*_thigh_joint": 0.6,
+          r".*_calf_joint": 0.2,
+          r".*_ankle_pitch_joint": 0.1,
+          r".*_ankle_roll_joint": 0.3,
+          r".*_shoulder_roll_joint": 0.5,
           r".*_shoulder_pitch_joint": 0.15,
           r".*_upper_arm_joint": 0.1,
-          r".*_elbow_joint": 0.15,
+          r".*_elbow_joint": 0.1,
         },
         "std_running": {
           r".*_hip_pitch_joint": 0.3,
-          r".*_hip_roll_joint": 0.15,
-          r".*_thigh_joint": 0.15,
-          r".*_calf_joint": 0.35,
+          r".*_hip_roll_joint": 0.6,
+          r".*_thigh_joint": 0.6,
+          r".*_calf_joint": 0.05,
           r".*_ankle_pitch_joint": 0.25,
           r".*_ankle_roll_joint": 0.1,
-          r".*_shoulder_roll_joint": 0.15,
+          r".*_shoulder_roll_joint": 0.2,
           r".*_shoulder_pitch_joint": 0.15,
           r".*_upper_arm_joint": 0.1,
           r".*_elbow_joint": 0.15,
         },
         "walking_threshold": 0.05,
-        "running_threshold": 1.5,
+        "running_threshold": 1.0,
       },
     ),
-    "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-0.4),
+    "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
+    "joint_torques_l2": RewardTermCfg(func=mdp.joint_torques_l2, weight=-1e-3),
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
     "air_time": RewardTermCfg(
       func=mdp.feet_air_time,
-      weight=0.0,
+      weight=1.0,
       params={
         "sensor_name": "feet_ground_contact",
         "threshold_min": 0.05,
@@ -276,7 +300,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "foot_slip": RewardTermCfg(
       func=mdp.feet_slip,
-      weight=-0.1,
+      weight=-0.25,
       params={
         "sensor_name": "feet_ground_contact",
         "command_name": "twist",
@@ -286,33 +310,27 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "soft_landing": RewardTermCfg(
       func=mdp.soft_landing,
-      weight=-1e-5,
+      weight=-1e-3,
       params={
         "sensor_name": "feet_ground_contact",
         "command_name": "twist",
         "command_threshold": 0.05,
       },
     ),
-    "diffusion_style": RewardTermCfg(
-        func=DiffusionStyleReward,
-        weight=1500.0,
-        params=dict(
-            asset_cfg=SceneEntityCfg("robot", site_names=["l_foot", "r_foot", "l_hand", "r_hand"], body_names=("base_link",)),
-            checkpoint_path="/homes/17vahl/mjlab_piplus/epoch_0500.pt",
-            robot_scale=0.25,               # your robot's size relative to training data
-            stance_shift=0.1,               # lateral EE offset in model-space metres
-            noise_levels=(0.1, 0.7, 0.95),
-            level_weights=(0.3, 0.3, 0.4),
-            # tune these to balance style components:
-            scale_root_vel_trans=0.0,
-            scale_root_vel_rot=0.5,
-            scale_foot_trans=1.0,
-            scale_foot_rot=0.5,
-            scale_hand_trans=1.0,
-            scale_hand_rot=0.5,
-            reward_scale=300.0,
-        ),
-    )
+    "phase": RewardTermCfg(
+      func=Phase,
+      weight=1.0,
+      params={
+        "heavy_tail_shift": 0.9,
+        "target_height": 0.03,
+        "rest_height": 0.05,
+        "asset_cfg": SceneEntityCfg("robot", site_names=foot_sites),
+      },
+    ),
+    "alive": RewardTermCfg(
+      func=mdp.is_alive,
+      weight = 1.5
+      )
   }
   ##
   # Terminations
@@ -323,6 +341,13 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
       func=mdp.bad_orientation,
       params={"limit_angle": math.radians(70.0)},
     ),
+    "too_low": TerminationTermCfg(
+      func=mdp.root_height_below_minimum,
+      params={
+        "minimum_height": 0.25,
+        "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",))
+      }
+    )
   }
 
   ##
@@ -334,10 +359,10 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
       params={
            "command_name": "twist",
            "velocity_stages": [
-           {"step": 0, "lin_vel_x": (0.0, 0.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
-           {"step": 200 * 24, "lin_vel_x": (-0.25, 0.25), "lin_vel_y": (-0.1, 0.1), "ang_vel_z": (-0.5, 0.5)},
-           {"step": 8000 * 24, "lin_vel_x": (-0.75, 0.75), "lin_vel_y": (-0.4, 0.4), "ang_vel_z": (-1.0, 1.0)},
-           {"step": 12000 * 24, "lin_vel_x": (-1.5, 1.5), "lin_vel_y": (-0.75, 0.75), "ang_vel_z": (-1.5, 1.5)},
+           {"step": 0, "lin_vel_x": (-0.0, 0.0), "lin_vel_y": (-0.0, 0.0), "ang_vel_z": (-0.0, 0.0)},
+           {"step": 800 * 24, "lin_vel_x": (-0.25, 0.25), "lin_vel_y": (-0.1, 0.1), "ang_vel_z": (-0.5, 0.5)},
+           {"step": 1400 * 24, "lin_vel_x": (-0.75, 0.75), "lin_vel_y": (-0.4, 0.4), "ang_vel_z": (-1.0, 1.0)},
+           {"step": 1800 * 24, "lin_vel_x": (-1.5, 1.5), "lin_vel_y": (-0.75, 0.75), "ang_vel_z": (-1.5, 1.5)},
            ],
        },
    ),
@@ -347,8 +372,28 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
         "reward_name": "upright",
         "stages": [
             {"step": 0, "weight": 1.0},
-            {"step": 500 * 24, "weight": 0.5},
-            {"step": 1400 * 24, "weight": 0.05},
+            {"step": 1000 * 24, "weight": 0.5},
+            {"step": 1700 * 24, "weight": 0.01},
+        ],
+    }),
+     "air_time_weight": CurriculumTermCfg(
+    func=mdp.reward_curriculum,
+    params={
+        "reward_name": "air_time",
+        "stages": [
+            {"step": 0, "weight": 0.0},
+            {"step": 800 * 24, "weight": 2.0},
+        ],
+    }),
+    "joint_torques_l2_weight": CurriculumTermCfg(
+    func=mdp.reward_curriculum,
+    params={
+        "reward_name": "joint_torques_l2",
+        "stages": [
+            {"step": 0, "weight": 0.0},
+            {"step": 500 * 24, "weight": -1e-4},
+            {"step": 2000 * 24, "weight": -1e-3},
+            {"step": 3000 * 24, "weight": -5e-3},
         ],
     },
   ),
