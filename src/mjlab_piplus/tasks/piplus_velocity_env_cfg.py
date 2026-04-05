@@ -137,7 +137,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
       ),
     ),
     "phase": PhaseCommandTermCfg(
-      frequency=2.0
+      frequency=1.8
     ),
   }
   ##
@@ -202,8 +202,13 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
   rewards = {
     "track_linear_velocity": RewardTermCfg(
       func=mdp.track_linear_velocity,
-      weight=3.0,
+      weight=2.0,
       params={"command_name": "twist", "std": math.sqrt(0.25)},
+    ),
+    "track_linear_velocity_fine": RewardTermCfg(
+      func=mdp.track_linear_velocity,
+      weight=8.0,
+      params={"command_name": "twist", "std": math.sqrt(0.03)},
     ),
     "track_angular_velocity": RewardTermCfg(
       func=mdp.track_angular_velocity,
@@ -230,7 +235,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "pose": RewardTermCfg(
       func=mdp.variable_posture,
-      weight=1.0,
+      weight=1.5,
       params={
         "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
         "command_name": "twist",
@@ -242,7 +247,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
           r".*_calf_joint": 0.2,
           r".*_ankle_pitch_joint": 0.1,
           r".*_ankle_roll_joint": 0.3,
-          r".*_shoulder_roll_joint": 0.5,
+          r".*_shoulder_roll_joint": 0.8,
           r".*_shoulder_pitch_joint": 0.15,
           r".*_upper_arm_joint": 0.1,
           r".*_elbow_joint": 0.1,
@@ -254,7 +259,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
           r".*_calf_joint": 0.05,
           r".*_ankle_pitch_joint": 0.25,
           r".*_ankle_roll_joint": 0.1,
-          r".*_shoulder_roll_joint": 0.2,
+          r".*_shoulder_roll_joint": 0.1,
           r".*_shoulder_pitch_joint": 0.15,
           r".*_upper_arm_joint": 0.1,
           r".*_elbow_joint": 0.15,
@@ -310,7 +315,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "soft_landing": RewardTermCfg(
       func=mdp.soft_landing,
-      weight=-1e-3,
+      weight=-0.001,
       params={
         "sensor_name": "feet_ground_contact",
         "command_name": "twist",
@@ -321,7 +326,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
       func=Phase,
       weight=1.0,
       params={
-        "heavy_tail_shift": 0.9,
+        "heavy_tail_shift": 0.6,
         "target_height": 0.03,
         "rest_height": 0.05,
         "asset_cfg": SceneEntityCfg("robot", site_names=foot_sites),
@@ -329,7 +334,7 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
     ),
     "alive": RewardTermCfg(
       func=mdp.is_alive,
-      weight = 1.5
+      weight = 1.8
       )
   }
   ##
@@ -373,7 +378,6 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
         "stages": [
             {"step": 0, "weight": 1.0},
             {"step": 1000 * 24, "weight": 0.5},
-            {"step": 1700 * 24, "weight": 0.01},
         ],
     }),
      "air_time_weight": CurriculumTermCfg(
@@ -385,7 +389,18 @@ def piplus_velocity_env_cfg(play: bool = False, static: bool = False) -> Manager
             {"step": 800 * 24, "weight": 2.0},
         ],
     }),
-    "joint_torques_l2_weight": CurriculumTermCfg(
+    "soft_landing_weight": CurriculumTermCfg(
+    func=mdp.reward_curriculum,
+    params={
+        "reward_name": "soft_landing",
+        "stages": [
+            {"step": 0, "weight": 0.0},
+            {"step": 2500 * 24, "weight": -0.01},
+            {"step": 2500 * 24, "weight": -0.04},
+        ],
+    },
+  ),
+  "joint_torques_l2_weight": CurriculumTermCfg(
     func=mdp.reward_curriculum,
     params={
         "reward_name": "joint_torques_l2",
