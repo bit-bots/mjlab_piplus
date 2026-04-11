@@ -17,6 +17,7 @@ from mjlab.scene import SceneCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.tasks.velocity import mdp
+from mjlab.tasks.velocity.mdp.rewards import variable_posture as VelocityVariablePosture
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
@@ -59,6 +60,52 @@ def distance_to_ball(env, asset_cfg: SceneEntityCfg = None) -> torch.Tensor:
     robot_pos = robot.data.root_link_pos_w[:, :2]
     distance = torch.norm(ball_pos - robot_pos, dim=1, keepdim=True)
     return distance
+
+
+class variable_posture_actual_speed(VelocityVariablePosture):
+    """Pose reward with regime masks from robot actual speed.
+
+    Keeps reward form and per-joint std tensors from base class, but chooses
+    standing/walking/running masks using measured root-link velocities instead
+    of commanded velocities.
+    """
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        std_standing,
+        std_walking,
+        std_running,
+        asset_cfg: SceneEntityCfg,
+        command_name: str,
+        walking_threshold: float = 0.05,
+        running_threshold: float = 1.5,
+    ) -> torch.Tensor:
+        del std_standing, std_walking, std_running, command_name
+
+        asset = env.scene[asset_cfg.name]
+
+        linear_speed = torch.norm(asset.data.root_link_lin_vel_b[:, :2], dim=1)
+        angular_speed = torch.abs(asset.data.root_link_ang_vel_b[:, 2])
+        total_speed = linear_speed + angular_speed
+
+        standing_mask = (total_speed < walking_threshold).float()
+        walking_mask = (
+            (total_speed >= walking_threshold) & (total_speed < running_threshold)
+        ).float()
+        running_mask = (total_speed >= running_threshold).float()
+
+        std = (
+            self.std_standing * standing_mask.unsqueeze(1)
+            + self.std_walking * walking_mask.unsqueeze(1)
+            + self.std_running * running_mask.unsqueeze(1)
+        )
+
+        current_joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+        desired_joint_pos = self.default_joint_pos[:, asset_cfg.joint_ids]
+        error_squared = torch.square(current_joint_pos - desired_joint_pos)
+
+        return torch.exp(-torch.mean(error_squared / (std**2), dim=1))
 
 
 def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -235,12 +282,22 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"sensor_name": "robot/root_angmom"},
         ),
         "pose": RewardTermCfg(
-            func=mdp.variable_posture,
+            func=variable_posture_actual_speed,
             weight=1.0,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
                 "command_name": "twist",
-                "std_standing": {".*": 0.05},
+                "std_standing": {
+                    r".*_hip_pitch_joint": 0.08,
+                    r".*_hip_roll_joint": 0.06,
+                    r".*_thigh_joint": 0.05,
+                    r".*_calf_joint": 0.10,
+                    r".*_ankle_pitch_joint": 0.08,
+                    r".*_ankle_roll_joint": 0.06,
+                    r".*_shoulder_.*": 0.15,
+                    r".*_upper_arm_joint": 0.12,
+                    r".*_elbow_joint": 0.12,
+                },
                 "std_walking": {
                     r".*_hip_pitch_joint": 0.3,
                     r".*_hip_roll_joint": 0.15,
