@@ -26,6 +26,23 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
 
+def ball_distance_curriculum(env, env_ids, distance_stages: list) -> dict:
+    step = env.common_step_counter
+    current_stage = distance_stages[0]
+    for stage in distance_stages:
+        if step >= stage["step"]:
+            current_stage = stage
+
+    event_cfg = env.event_manager.get_term_cfg("reset_ball")
+    event_cfg.params["pose_range"]["x"] = current_stage["x"]
+    event_cfg.params["pose_range"]["y"] = current_stage["y"]
+
+    return {
+        "min_distance": torch.tensor(current_stage["x"][0]),
+        "max_distance": torch.tensor(current_stage["x"][1]),
+    }
+
+
 def ball_position_command(env, asset_cfg: SceneEntityCfg = None) -> torch.Tensor:
     robot = env.scene["robot"]
     ball = env.scene["ball"]
@@ -123,7 +140,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "twist": UniformVelocityCommandCfg(
             entity_name="robot",
             resampling_time_range=(3.0, 8.0),
-            rel_standing_envs=0.3,
+            rel_standing_envs=0.0,
             rel_heading_envs=0.5,
             heading_command=False,
             heading_control_stiffness=0.0,
@@ -199,16 +216,6 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     }
 
     rewards = {
-        "track_linear_velocity": RewardTermCfg(
-            func=mdp.track_linear_velocity,
-            weight=2.0,
-            params={"command_name": "twist", "std": math.sqrt(0.25)},
-        ),
-        "track_angular_velocity": RewardTermCfg(
-            func=mdp.track_angular_velocity,
-            weight=2.0,
-            params={"command_name": "twist", "std": math.sqrt(0.5)},
-        ),
         "upright": RewardTermCfg(
             func=mdp.flat_orientation,
             weight=2.0,
@@ -344,16 +351,14 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     }
 
     curriculum = {
-        "command_vel": CurriculumTermCfg(
-            func=mdp.commands_vel,
+        "ball_distance": CurriculumTermCfg(
+            func=ball_distance_curriculum,
             params={
-                "command_name": "twist",
-                "velocity_stages": [
-                    {"step": 0, "lin_vel_x": (0.0, 0.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
-                    {"step": 500 * 24, "lin_vel_x": (-0.1, 0.1), "lin_vel_y": (-0.05, 0.05), "ang_vel_z": (-0.2, 0.2)},
-                    {"step": 1000 * 24, "lin_vel_x": (-0.25, 0.25), "lin_vel_y": (-0.1, 0.1), "ang_vel_z": (-0.5, 0.5)},
-                    {"step": 2000 * 24, "lin_vel_x": (-0.5, 0.5), "lin_vel_y": (-0.25, 0.25), "ang_vel_z": (-0.75, 0.75)},
-                    {"step": 5000 * 24, "lin_vel_x": (-1.0, 1.0), "lin_vel_y": (-0.5, 0.5), "ang_vel_z": (-1.0, 1.0)},
+                "distance_stages": [
+                    {"step": 0,          "x": (0.3, 0.5), "y": (-0.2, 0.2)},
+                    {"step": 500 * 24,   "x": (0.5, 1.0), "y": (-0.3, 0.3)},
+                    {"step": 1500 * 24,  "x": (0.8, 1.5), "y": (-0.5, 0.5)},
+                    {"step": 3000 * 24,  "x": (1.0, 2.0), "y": (-0.5, 0.5)},
                 ],
             },
         ),
