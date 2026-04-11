@@ -145,7 +145,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "pose_range": {
                     "x": (-0.5, 0.5),
                     "y": (-0.5, 0.5),
-                    "z": (0.35, 0.45),
+                    "z": (0.01, 0.05),
                     "yaw": (-3.14, 3.14),
                 },
                 "velocity_range": {},
@@ -211,7 +211,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "upright": RewardTermCfg(
             func=mdp.flat_orientation,
-            weight=1.0,
+            weight=2.0,
             params={
                 "std": math.sqrt(0.2),
                 "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
@@ -324,6 +324,14 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=reach_ball_reward,
             weight=2.0,
             params={},
+        ),
+        "alive": RewardTermCfg(
+            func=mdp.is_alive,
+            weight=1.0,
+        ),
+        "termination_penalty": RewardTermCfg(
+            func=mdp.is_terminated,
+            weight=-50.0,
         ),
     }
 
