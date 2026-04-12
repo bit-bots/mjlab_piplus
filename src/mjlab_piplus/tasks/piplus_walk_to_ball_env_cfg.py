@@ -9,7 +9,6 @@ from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
-from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.scene import SceneCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
@@ -39,10 +38,17 @@ def ball_distance_curriculum(env, env_ids, distance_stages: list) -> dict:
 def ball_position_command(env, asset_cfg: SceneEntityCfg = None) -> torch.Tensor:
     robot = env.scene["robot"]
     ball = env.scene["ball"]
-    ball_pos = ball.data.root_link_pos_w
-    robot_pos = robot.data.root_link_pos_w
-    rel_pos = ball_pos - robot_pos
-    return rel_pos[:, :2]
+    ball_pos = ball.data.root_link_pos_w[:, :2]
+    robot_pos = robot.data.root_link_pos_w[:, :2]
+    rel_pos_w = ball_pos - robot_pos
+
+    heading = robot.data.heading_w
+    cos_h = torch.cos(heading)
+    sin_h = torch.sin(heading)
+    rel_x_b = cos_h * rel_pos_w[:, 0] + sin_h * rel_pos_w[:, 1]
+    rel_y_b = -sin_h * rel_pos_w[:, 0] + cos_h * rel_pos_w[:, 1]
+
+    return torch.stack((rel_x_b, rel_y_b), dim=1)
 
 
 def distance_to_ball(env, asset_cfg: SceneEntityCfg = None) -> torch.Tensor:
@@ -302,11 +308,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         )
     }
 
-    ##
-    # Commands
-    ##
-    commands: dict[] = {
-    }
+    commands = {}
     ##
     # Events
     ##
@@ -363,15 +365,13 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     rewards = {
         "alive": RewardTermCfg(
             func=mdp.is_alive,
-            weight=1.8,
+            weight=0.2,
         ),
         "soft_landing": RewardTermCfg(
             func=mdp.soft_landing,
             weight=-0.001,
             params={
                 "sensor_name": "feet_ground_contact",
-                "command_name": "twist",
-                "command_threshold": 0.05,
             },
         ),
         "upright": RewardTermCfg(
@@ -383,71 +383,50 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             },
         ),
         "pose": RewardTermCfg(
-            func=mdp.variable_posture,
-            weight=1.5,
+            func=mdp.posture,
+            weight=0.8,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
-                "command_name": "twist",
-                "std_standing": {".*": 0.5},  # Set per-robot.
-                "std_walking": {
-                    r".*_hip_pitch_joint": 0.2,
-                    r".*_hip_roll_joint": 0.6,
-                    r".*_thigh_joint": 0.6,
-                    r".*_calf_joint": 0.2,
-                    r".*_ankle_pitch_joint": 0.1,
-                    r".*_ankle_roll_joint": 0.3,
-                    r".*_shoulder_roll_joint": 0.8,
-                    r".*_shoulder_pitch_joint": 0.15,
-                    r".*_upper_arm_joint": 0.1,
-                    r".*_elbow_joint": 0.1,
-                },
-                "std_running": {
-                    r".*_hip_pitch_joint": 0.3,
-                    r".*_hip_roll_joint": 0.6,
-                    r".*_thigh_joint": 0.6,
-                    r".*_calf_joint": 0.05,
-                    r".*_ankle_pitch_joint": 0.25,
-                    r".*_ankle_roll_joint": 0.1,
-                    r".*_shoulder_roll_joint": 0.1,
-                    r".*_shoulder_pitch_joint": 0.15,
-                    r".*_upper_arm_joint": 0.1,
-                    r".*_elbow_joint": 0.15,
-                },
-                "walking_threshold": 0.05,
-                "running_threshold": 1.0,
+                "std": {".*": 0.5},
             },
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
-#        "ball_progress": RewardTermCfg(
-#            func=BallProgressReward,
-#            weight=6.0,
-#            params={"progress_scale": 0.02},
-#        ),
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.05),
+        "ball_progress": RewardTermCfg(
+            func=BallProgressReward,
+            weight=6.0,
+            params={"progress_scale": 0.02},
+        ),
         "toward_ball_velocity": RewardTermCfg(
             func=toward_ball_velocity_reward,
             weight=2.0,
             params={"target_speed": 0.4},
         ),
-#        "face_ball_while_moving": RewardTermCfg(
-#            func=face_ball_while_moving_reward,
-#            weight=1.5,
-#            params={"target_speed": 0.4, "facing_cos_min": 0.5},
-#        ),
-#        "face_ball_near": RewardTermCfg(
-#            func=face_ball_near_reward,
-#            weight=1.0,
-#            params={"near_distance": 0.6, "facing_cos_min": 0.7},
-#        ),
+        "face_ball_while_moving": RewardTermCfg(
+            func=face_ball_while_moving_reward,
+            weight=1.5,
+            params={"target_speed": 0.4, "facing_cos_min": 0.5},
+        ),
+        "face_ball_near": RewardTermCfg(
+            func=face_ball_near_reward,
+            weight=1.0,
+            params={"near_distance": 0.6, "facing_cos_min": 0.7},
+        ),
         "approach_ball": RewardTermCfg(
             func=approach_ball_reward,
-            weight=2.0,
+            weight=1.5,
             params={},
-        )
-#        "success_bonus": RewardTermCfg(
-#            func=success_bonus,
-#            weight=250.0,
-#            params={"term_name": "success_facing_ball"},
-#        )
+        ),
+        "success_bonus": RewardTermCfg(
+            func=success_bonus,
+            weight=300.0,
+            params={"term_name": "success_facing_ball"},
+        ),
+        "termination_penalty": RewardTermCfg(
+            func=fell_over_only_penalty,
+            weight=-300.0,
+            params={"term_name": "fell_over"},
+        ),
     }
 
     ##
@@ -479,10 +458,10 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=ball_distance_curriculum,
             params={
                 "distance_stages": [
-                    {"step": 0,          "x": (0.3, 0.5), "y": (-0.2, 0.2)},
-#                    {"step": 500 * 24,   "x": (0.5, 1.0), "y": (-0.3, 0.3)},
-#                    {"step": 1500 * 24,  "x": (0.8, 1.5), "y": (-0.5, 0.5)},
-#                    {"step": 3000 * 24,  "x": (1.0, 2.0), "y": (-0.5, 0.5)},
+                    {"step": 0,          "x": (0.3, 0.6), "y": (-0.2, 0.2)},
+                    {"step": 600 * 24,   "x": (0.6, 1.0), "y": (-0.3, 0.3)},
+                    {"step": 1600 * 24,  "x": (0.9, 1.6), "y": (-0.5, 0.5)},
+                    {"step": 3200 * 24,  "x": (1.2, 2.0), "y": (-0.5, 0.5)},
                 ],
             },
         ),
