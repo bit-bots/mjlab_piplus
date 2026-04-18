@@ -394,7 +394,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             },
         ),
         "upright": RewardTermCfg(
-            func=mdp.flat_orientation,
+            func=mdp.upright,
             weight=2.0,
             params={
                 "std": math.sqrt(0.2),
