@@ -16,7 +16,8 @@ from mjlab.tasks.velocity import mdp
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 from mjlab_piplus.robot.piplus_constants import get_piplus_robot_cfg, get_ball_cfg
-from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg, TerrainHeightSensorCfg, ObjRef
+
 
 def ball_distance_curriculum(env, env_ids, distance_stages: list) -> dict:
     step = env.common_step_counter
@@ -87,7 +88,9 @@ class BallProgressReward:
             env_ids = slice(None)
         self.prev_distance[env_ids] = float("nan")
 
-    def __call__(self, env: ManagerBasedRlEnv, progress_scale: float = 0.01) -> torch.Tensor:
+    def __call__(
+        self, env: ManagerBasedRlEnv, progress_scale: float = 0.01
+    ) -> torch.Tensor:
         _, _, distance, _ = _ball_relative_xy(env)
 
         first_step_mask = torch.isnan(self.prev_distance)
@@ -229,7 +232,23 @@ def approach_ball_reward(env, asset_cfg: SceneEntityCfg = None) -> torch.Tensor:
 
 
 def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-    foot_sites = ("l_foot", "r_foot")
+    foot_height_scan = TerrainHeightSensorCfg(
+        name="foot_height_scan",
+        frame=(
+            ObjRef(type="site", name="l_foot", entity="robot"),
+            ObjRef(type="site", name="r_foot", entity="robot"),
+        ),
+        ray_alignment="yaw",
+        max_distance=1.0,
+        exclude_parent_body=True,
+        include_geom_groups=(0,),
+        debug_vis=False,
+        viz=TerrainHeightSensorCfg.VizCfg(
+            show_rays=True,
+            hit_color=(1.0, 0.0, 1.0, 0.8),
+            hit_sphere_color=(1.0, 0.0, 1.0, 1.0),
+        ),
+    )
     ##
     # Observations
     ##
@@ -268,7 +287,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         **actor_terms,
         "foot_height": ObservationTermCfg(
             func=mdp.foot_height,
-            params={"asset_cfg": SceneEntityCfg("robot", site_names=foot_sites)},
+            params={"sensor_name": "foot_height_scan"},
         ),
         "foot_air_time": ObservationTermCfg(
             func=mdp.foot_air_time,
@@ -458,15 +477,14 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=ball_distance_curriculum,
             params={
                 "distance_stages": [
-                    {"step": 0,          "x": (0.3, 0.6), "y": (-0.2, 0.2)},
-                    {"step": 600 * 24,   "x": (0.6, 1.0), "y": (-0.3, 0.3)},
-                    {"step": 1600 * 24,  "x": (0.9, 1.6), "y": (-0.5, 0.5)},
-                    {"step": 3200 * 24,  "x": (1.2, 2.0), "y": (-0.5, 0.5)},
+                    {"step": 0, "x": (0.3, 0.6), "y": (-0.2, 0.2)},
+                    {"step": 600 * 24, "x": (0.6, 1.0), "y": (-0.3, 0.3)},
+                    {"step": 1600 * 24, "x": (0.9, 1.6), "y": (-0.5, 0.5)},
+                    {"step": 3200 * 24, "x": (1.2, 2.0), "y": (-0.5, 0.5)},
                 ],
             },
         ),
     }
-
 
     ##
     # Scene
@@ -492,19 +510,18 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         reduce="none",
         num_slots=1,
     )
-    scene = SceneCfg(   
+    scene = SceneCfg(
         entities={
             "robot": get_piplus_robot_cfg(),
             "ball": get_ball_cfg(),
         },
-        sensors=[feet_contact_sensor_cfg, self_collision_cfg],
+        sensors=[feet_contact_sensor_cfg, self_collision_cfg, foot_height_scan],
         terrain=TerrainEntityCfg(
             terrain_type="plane",
             terrain_generator=None,
             max_init_terrain_level=0,
         ),
     )
-
 
     ##
     # Viewer
