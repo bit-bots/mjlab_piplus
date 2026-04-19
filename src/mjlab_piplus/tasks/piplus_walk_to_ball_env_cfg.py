@@ -74,6 +74,23 @@ def _ball_relative_xy(env: ManagerBasedRlEnv):
     return robot, rel_pos, distance, direction
 
 
+ARM_JOINT_PATTERNS = (
+    ".*_shoulder_pitch_joint",
+    ".*_shoulder_roll_joint",
+    ".*_upper_arm_joint",
+    ".*_elbow_joint",
+)
+
+LEG_JOINT_PATTERNS = (
+    ".*_hip_pitch_joint",
+    ".*_hip_roll_joint",
+    ".*_thigh_joint",
+    ".*_calf_joint",
+    ".*_ankle_pitch_joint",
+    ".*_ankle_roll_joint",
+)
+
+
 class BallProgressReward:
     """Dense progress reward: positive only when distance decreases."""
 
@@ -401,16 +418,79 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
             },
         ),
-        "pose": RewardTermCfg(
+        "leg_pose": RewardTermCfg(
             func=mdp.posture,
             weight=0.8,
             params={
-                "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
-                "std": {".*": 0.5},
+                "asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINT_PATTERNS),
+                "std": {".*": 0.45},
             },
         ),
+        "arm_pose": RewardTermCfg(
+            func=mdp.posture,
+            weight=0.7,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=ARM_JOINT_PATTERNS),
+                "std": {".*": 0.12},
+            },
+        ),
+        "body_ang_vel": RewardTermCfg(
+            func=mdp.body_angular_velocity_penalty,
+            weight=-0.02,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=("base_link",))},
+        ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
-        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.05),
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.08),
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.005),
+        "arm_joint_vel_l2": RewardTermCfg(
+            func=mdp.joint_vel_l2,
+            weight=-0.002,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=ARM_JOINT_PATTERNS,
+                )
+            },
+        ),
+        "leg_joint_vel_l2": RewardTermCfg(
+            func=mdp.joint_vel_l2,
+            weight=-0.0005,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=LEG_JOINT_PATTERNS,
+                )
+            },
+        ),
+        "arm_torque_l2": RewardTermCfg(
+            func=mdp.joint_torques_l2,
+            weight=-2e-4,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    actuator_names=ARM_JOINT_PATTERNS,
+                )
+            },
+        ),
+        "leg_torque_l2": RewardTermCfg(
+            func=mdp.joint_torques_l2,
+            weight=-8e-5,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    actuator_names=LEG_JOINT_PATTERNS,
+                )
+            },
+        ),
+        "air_time": RewardTermCfg(
+            func=mdp.feet_air_time,
+            weight=0.15,
+            params={
+                "sensor_name": "feet_ground_contact",
+                "threshold_min": 0.1,
+                "threshold_max": 0.45,
+            },
+        ),
         "ball_progress": RewardTermCfg(
             func=BallProgressReward,
             weight=6.0,
