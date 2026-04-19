@@ -254,7 +254,7 @@ def get_ball_spec() -> mujoco.MjSpec:
   return mujoco.MjSpec.from_file(str(BALL_XML))
 
 BALL_INIT = EntityCfg.InitialStateCfg(
-  pos=(1.5, 0.0, 0.11),
+  pos=(1.5, 0.0, 0.10),
   joint_pos={".*": 0.0},
   joint_vel={".*": 0.0},
 )

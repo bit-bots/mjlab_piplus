@@ -86,6 +86,9 @@ LEG_JOINT_PATTERNS = (
     ".*_hip_roll_joint",
     ".*_thigh_joint",
     ".*_calf_joint",
+)
+
+ANKLE_JOINT_PATTERNS = (
     ".*_ankle_pitch_joint",
     ".*_ankle_roll_joint",
 )
@@ -378,7 +381,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "pose_range": {
                     "x": (1.0, 2.0),
                     "y": (-0.5, 0.5),
-                    "z": (0.11, 0.11),
+                    "z": (0.10, 0.10),
                     "yaw": (-3.14, 3.14),
                 },
                 "velocity_range": {
@@ -426,6 +429,14 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "std": {".*": 0.45},
             },
         ),
+        "ankle_pose": RewardTermCfg(
+            func=mdp.posture,
+            weight=0.8,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=ANKLE_JOINT_PATTERNS),
+                "std": {".*": 0.08},
+            },
+        ),
         "arm_pose": RewardTermCfg(
             func=mdp.posture,
             weight=0.7,
@@ -462,6 +473,16 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 )
             },
         ),
+        "ankle_joint_vel_l2": RewardTermCfg(
+            func=mdp.joint_vel_l2,
+            weight=-0.001,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=ANKLE_JOINT_PATTERNS,
+                )
+            },
+        ),
         "arm_torque_l2": RewardTermCfg(
             func=mdp.joint_torques_l2,
             weight=-2e-4,
@@ -479,6 +500,16 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg(
                     "robot",
                     actuator_names=LEG_JOINT_PATTERNS,
+                )
+            },
+        ),
+        "ankle_torque_l2": RewardTermCfg(
+            func=mdp.joint_torques_l2,
+            weight=-1.2e-4,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    actuator_names=ANKLE_JOINT_PATTERNS,
                 )
             },
         ),

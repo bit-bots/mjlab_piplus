@@ -209,7 +209,7 @@ def piplus_velocity_env_cfg(
                 "pose_range": {
                     "x": (1.0, 2.0),
                     "y": (-0.5, 0.5),
-                    "z": (0.11, 0.11),
+                    "z": (0.10, 0.10),
                     "yaw": (-3.14, 3.14),
                 },
                 "velocity_range": {
