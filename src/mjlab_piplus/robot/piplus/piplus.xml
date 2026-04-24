@@ -180,10 +180,8 @@
                   <joint name="r_ankle_roll_joint" class="pi_joint_leg" pos="0 0 0" axis="1 0 0" range="-0.78 0.78"/>
                   <geom type="mesh" class="visual" rgba="0.752941 0.752941 0.752941 1" mesh="r_ankle_roll_link"/>
                   <geom name="r_ankle_roll_link_collision0" class="collision" pos="0.028 0 0" type="box" size="0.03 0.03 0.021"/>
-                  <geom name="r_ankle_roll_link_collision1" class="collision" pos="-0.017 -0.025 -0.04" quat="0.7071 0 0.7071 0" type="cylinder" size="0.01 0.065" />
-                  <geom name="r_ankle_roll_link_collision2" class="collision" pos="-0.0272 -0.009 -0.04" quat="0.7071 0 -0.7071 0" type="cylinder" size="0.01 0.082" />
-                  <geom name="r_ankle_roll_link_collision3" class="collision" pos="-0.0272 0.009 -0.04" quat="0.7071 0 -0.7071 0" type="cylinder" size="0.01 0.082" />
-                  <geom name="r_ankle_roll_link_collision4" class="collision" pos="-0.017 0.025 -0.04" quat="0.7071 0 0.7071 0" type="cylinder" size="0.01 0.065" />
+                  <geom name="r_ankle_roll_link_collision1" class="collision" pos="-0.004 0 -0.04" type="box" size="0.05 0.028 0.0045" />
+                  <geom name="r_ankle_roll_link_collision2" class="collision" pos="-0.048 0 -0.04" type="box" size="0.012 0.024 0.0045" />
                 </body>
               </body>
             </body>
@@ -222,10 +220,8 @@
                   <joint name="l_ankle_roll_joint" class="pi_joint_leg" pos="0 0 0" axis="1 0 0" range="-0.78 0.78"/>
                   <geom type="mesh" class="visual" rgba="0.752941 0.752941 0.752941 1" mesh="l_ankle_roll_link"/>
                   <geom name="l_ankle_roll_link_collision0" class="collision" pos="0.028 0 0" type="box" size="0.03 0.03 0.021" />
-                  <geom name="l_ankle_roll_link_collision1" class="collision" pos="-0.017 -0.025 -0.04" quat="0.7071 0 0.7071 0" type="cylinder" size="0.01 0.065" />
-                  <geom name="l_ankle_roll_link_collision2" class="collision" pos="-0.0272 -0.009 -0.04" quat="0.7071 0 -0.7071 0" type="cylinder" size="0.01 0.082" />
-                  <geom name="l_ankle_roll_link_collision3" class="collision" pos="-0.0272 0.009 -0.04" quat="0.7071 0 -0.7071 0" type="cylinder" size="0.01 0.082" />
-                  <geom name="l_ankle_roll_link_collision4" class="collision" pos="-0.017 0.025 -0.04" quat="0.7071 0 0.7071 0" type="cylinder" size="0.01 0.065" />
+                  <geom name="l_ankle_roll_link_collision1" class="collision" pos="-0.004 0 -0.04" type="box" size="0.05 0.028 0.0045" />
+                  <geom name="l_ankle_roll_link_collision2" class="collision" pos="-0.048 0 -0.04" type="box" size="0.012 0.024 0.0045" />
                 </body>
               </body>
             </body>

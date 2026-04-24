@@ -17,6 +17,7 @@ from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 from mjlab_piplus.robot.piplus_constants import get_piplus_robot_cfg, get_ball_cfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, TerrainHeightSensorCfg, ObjRef
+from mjlab.utils.lab_api.math import quat_apply_inverse
 
 
 def ball_distance_curriculum(env, env_ids, distance_stages: list) -> dict:
@@ -122,6 +123,80 @@ class BallProgressReward:
 
         self.prev_distance = distance.detach().clone()
         return reward
+
+
+class FootPitchRollWindowReward:
+    """Reward foot level with toe-off/heel-strike pitch window."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        del cfg
+        self.prev_contact_any = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None):
+        if env_ids is None:
+            env_ids = slice(None)
+        self.prev_contact_any[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        asset_cfg: SceneEntityCfg,
+        roll_limit_deg: float = 4.0,
+        pitch_contact_limit_deg: float = 6.0,
+        pitch_swing_limit_deg: float = 14.0,
+        toe_off_heel_strike_limit_deg: float = 12.0,
+        contact_force_threshold: float = 25.0,
+    ) -> torch.Tensor:
+        asset = env.scene[asset_cfg.name]
+        foot_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+        num_envs, num_feet = foot_quat_w.shape[0], foot_quat_w.shape[1]
+
+        up_w = torch.zeros((num_envs, num_feet, 3), device=env.device)
+        up_w[..., 2] = 1.0
+        up_b = quat_apply_inverse(
+            foot_quat_w.reshape(-1, 4), up_w.reshape(-1, 3)
+        ).reshape(num_envs, num_feet, 3)
+
+        pitch_abs = torch.abs(torch.asin(torch.clamp(up_b[..., 0], -1.0, 1.0)))
+        roll_abs = torch.abs(torch.asin(torch.clamp(up_b[..., 1], -1.0, 1.0)))
+
+        contact_sensor = env.scene[sensor_name]
+        force = contact_sensor.data.force
+        assert force is not None
+        force_mag = torch.norm(force, dim=-1)
+
+        if force_mag.shape[1] == num_feet:
+            contact_per_foot = force_mag > contact_force_threshold
+            contact_any = contact_per_foot.any(dim=1)
+        else:
+            contact_any = force_mag.max(dim=1).values > contact_force_threshold
+            contact_per_foot = contact_any.unsqueeze(1).expand(-1, num_feet)
+
+        transition_mask = contact_any ^ self.prev_contact_any
+        self.prev_contact_any = contact_any.detach().clone()
+
+        roll_limit = math.radians(max(roll_limit_deg, 1e-3))
+        pitch_contact_limit = math.radians(max(pitch_contact_limit_deg, 1e-3))
+        pitch_swing_limit = math.radians(max(pitch_swing_limit_deg, 1e-3))
+        toe_heel_limit = math.radians(max(toe_off_heel_strike_limit_deg, 1e-3))
+
+        pitch_contact_limit_per_env = torch.where(
+            transition_mask,
+            pitch_abs.new_full((num_envs,), toe_heel_limit),
+            pitch_abs.new_full((num_envs,), pitch_contact_limit),
+        )
+        pitch_limit = torch.where(
+            contact_per_foot,
+            pitch_contact_limit_per_env.unsqueeze(1),
+            pitch_abs.new_full((num_envs, num_feet), pitch_swing_limit),
+        )
+
+        roll_score = torch.clamp(1.0 - roll_abs / roll_limit, min=0.0)
+        pitch_score = torch.clamp(1.0 - pitch_abs / pitch_limit, min=0.0)
+        return (roll_score * pitch_score).mean(dim=1)
 
 
 def toward_ball_velocity_reward(
@@ -341,7 +416,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     actions: dict[str, ActionTermCfg] = {
         "joint_pos": JointPositionActionCfg(
             entity_name="robot",
-            actuator_names=(".*",),
+            actuator_names=LEG_JOINT_PATTERNS + ANKLE_JOINT_PATTERNS,
             scale=0.5,
             use_default_offset=True,
         )
@@ -431,10 +506,26 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "ankle_pose": RewardTermCfg(
             func=mdp.posture,
-            weight=0.8,
+            weight=0.6,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=ANKLE_JOINT_PATTERNS),
                 "std": {".*": 0.08},
+            },
+        ),
+        "foot_pitch_roll_window": RewardTermCfg(
+            func=FootPitchRollWindowReward,
+            weight=1.2,
+            params={
+                "sensor_name": "feet_ground_contact",
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    body_names=("l_ankle_roll_link", "r_ankle_roll_link"),
+                ),
+                "roll_limit_deg": 4.0,
+                "pitch_contact_limit_deg": 6.0,
+                "pitch_swing_limit_deg": 14.0,
+                "toe_off_heel_strike_limit_deg": 12.0,
+                "contact_force_threshold": 25.0,
             },
         ),
         "arm_pose": RewardTermCfg(
@@ -505,7 +596,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "ankle_torque_l2": RewardTermCfg(
             func=mdp.joint_torques_l2,
-            weight=-1.2e-4,
+            weight=-1.6e-4,
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot",

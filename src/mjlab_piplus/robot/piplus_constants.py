@@ -192,7 +192,7 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
     ".*_shoulder_roll_joint": 0.0,
     ".*_shoulder_pitch_joint": 0.0,
     ".*_upper_arm_joint": 0.0,
-    ".*_elbow_joint": 0.0,
+    ".*_elbow_joint": -1.57,
   },
   joint_vel={".*": 0.0},
 )
