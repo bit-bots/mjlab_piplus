@@ -41,5 +41,5 @@ def get_piplus_velocity_rl_cfg() -> RslRlOnPolicyRunnerCfg:
     experiment_name="piplus_walk_to_ball",
     save_interval=50,
     num_steps_per_env=24,
-    max_iterations=30_000,
+    max_iterations=500,
   )

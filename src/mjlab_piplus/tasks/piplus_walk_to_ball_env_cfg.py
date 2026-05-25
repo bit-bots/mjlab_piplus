@@ -1,6 +1,7 @@
 import math
 import torch
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
+from mjlab.envs.mdp import dr
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
@@ -16,8 +17,7 @@ from mjlab.tasks.velocity import mdp
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 from mjlab_piplus.robot.piplus_constants import get_piplus_robot_cfg, get_ball_cfg
-from mjlab.sensor import ContactMatch, ContactSensorCfg, TerrainHeightSensorCfg, ObjRef
-from mjlab.utils.lab_api.math import quat_apply_inverse
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 
 
 def ball_distance_curriculum(env, env_ids, distance_stages: list) -> dict:
@@ -95,136 +95,20 @@ ANKLE_JOINT_PATTERNS = (
 )
 
 
-class BallProgressReward:
-    """Dense progress reward: positive only when distance decreases."""
-
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        del cfg
-        self.prev_distance = torch.full(
-            (env.num_envs,), float("nan"), device=env.device, dtype=torch.float32
-        )
-
-    def reset(self, env_ids: torch.Tensor | slice | None = None):
-        if env_ids is None:
-            env_ids = slice(None)
-        self.prev_distance[env_ids] = float("nan")
-
-    def __call__(
-        self, env: ManagerBasedRlEnv, progress_scale: float = 0.01
-    ) -> torch.Tensor:
-        _, _, distance, _ = _ball_relative_xy(env)
-
-        first_step_mask = torch.isnan(self.prev_distance)
-        prev = torch.where(first_step_mask, distance, self.prev_distance)
-
-        progress = (prev - distance) / max(progress_scale, 1e-6)
-        reward = torch.clamp(progress, min=-1.0, max=1.0)
-        reward = torch.where(first_step_mask, torch.zeros_like(reward), reward)
-
-        self.prev_distance = distance.detach().clone()
-        return reward
-
-
-class FootPitchRollWindowReward:
-    """Reward foot level with toe-off/heel-strike pitch window."""
-
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        del cfg
-        self.prev_contact_any = torch.zeros(
-            env.num_envs, device=env.device, dtype=torch.bool
-        )
-
-    def reset(self, env_ids: torch.Tensor | slice | None = None):
-        if env_ids is None:
-            env_ids = slice(None)
-        self.prev_contact_any[env_ids] = False
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        sensor_name: str,
-        asset_cfg: SceneEntityCfg,
-        roll_limit_deg: float = 4.0,
-        pitch_contact_limit_deg: float = 6.0,
-        pitch_swing_limit_deg: float = 14.0,
-        toe_off_heel_strike_limit_deg: float = 12.0,
-        contact_force_threshold: float = 25.0,
-    ) -> torch.Tensor:
-        asset = env.scene[asset_cfg.name]
-        foot_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
-        num_envs, num_feet = foot_quat_w.shape[0], foot_quat_w.shape[1]
-
-        up_w = torch.zeros((num_envs, num_feet, 3), device=env.device)
-        up_w[..., 2] = 1.0
-        up_b = quat_apply_inverse(
-            foot_quat_w.reshape(-1, 4), up_w.reshape(-1, 3)
-        ).reshape(num_envs, num_feet, 3)
-
-        pitch_abs = torch.abs(torch.asin(torch.clamp(up_b[..., 0], -1.0, 1.0)))
-        roll_abs = torch.abs(torch.asin(torch.clamp(up_b[..., 1], -1.0, 1.0)))
-
-        contact_sensor = env.scene[sensor_name]
-        force = contact_sensor.data.force
-        assert force is not None
-        force_mag = torch.norm(force, dim=-1)
-
-        if force_mag.shape[1] == num_feet:
-            contact_per_foot = force_mag > contact_force_threshold
-            contact_any = contact_per_foot.any(dim=1)
-        else:
-            contact_any = force_mag.max(dim=1).values > contact_force_threshold
-            contact_per_foot = contact_any.unsqueeze(1).expand(-1, num_feet)
-
-        transition_mask = contact_any ^ self.prev_contact_any
-        self.prev_contact_any = contact_any.detach().clone()
-
-        roll_limit = math.radians(max(roll_limit_deg, 1e-3))
-        pitch_contact_limit = math.radians(max(pitch_contact_limit_deg, 1e-3))
-        pitch_swing_limit = math.radians(max(pitch_swing_limit_deg, 1e-3))
-        toe_heel_limit = math.radians(max(toe_off_heel_strike_limit_deg, 1e-3))
-
-        pitch_contact_limit_per_env = torch.where(
-            transition_mask,
-            pitch_abs.new_full((num_envs,), toe_heel_limit),
-            pitch_abs.new_full((num_envs,), pitch_contact_limit),
-        )
-        pitch_limit = torch.where(
-            contact_per_foot,
-            pitch_contact_limit_per_env.unsqueeze(1),
-            pitch_abs.new_full((num_envs, num_feet), pitch_swing_limit),
-        )
-
-        roll_score = torch.clamp(1.0 - roll_abs / roll_limit, min=0.0)
-        pitch_score = torch.clamp(1.0 - pitch_abs / pitch_limit, min=0.0)
-        return (roll_score * pitch_score).mean(dim=1)
-
-
 def toward_ball_velocity_reward(
-    env, asset_cfg: SceneEntityCfg = None, target_speed: float = 0.4
+    env,
+    asset_cfg: SceneEntityCfg = None,
+    target_speed: float = 0.3,
+    stop_distance: float = 0.26,
+    fade_distance: float = 0.20,
+    facing_cos_min: float = 0.5,
 ) -> torch.Tensor:
     """Reward signed velocity component toward ball."""
     del asset_cfg
-    robot, _, _, direction = _ball_relative_xy(env)
-    vel_xy = robot.data.root_link_lin_vel_w[:, :2]
-    toward_speed = torch.sum(vel_xy * direction, dim=1)
-    return torch.clamp(toward_speed / max(target_speed, 1e-6), min=-1.0, max=1.0)
-
-
-def face_ball_while_moving_reward(
-    env,
-    asset_cfg: SceneEntityCfg = None,
-    target_speed: float = 0.4,
-    facing_cos_min: float = 0.5,
-) -> torch.Tensor:
-    """Reward moving toward ball while facing it."""
-    del asset_cfg
-    robot, _, _, direction = _ball_relative_xy(env)
-
+    robot, _, distance, direction = _ball_relative_xy(env)
     vel_xy = robot.data.root_link_lin_vel_w[:, :2]
     toward_speed = torch.sum(vel_xy * direction, dim=1)
     toward = torch.clamp(toward_speed / max(target_speed, 1e-6), min=-1.0, max=1.0)
-    toward_positive = torch.relu(toward)
-
     heading = robot.data.heading_w
     heading_vec = torch.stack((torch.cos(heading), torch.sin(heading)), dim=1)
     face_cos = torch.sum(heading_vec * direction, dim=1)
@@ -233,7 +117,10 @@ def face_ball_while_moving_reward(
         min=0.0,
         max=1.0,
     )
-    return toward_positive * face
+    move_gate = torch.clamp(
+        (distance - stop_distance) / max(fade_distance, 1e-6), min=0.0, max=1.0
+    )
+    return toward * move_gate * face
 
 
 def face_ball_near_reward(
@@ -278,10 +165,11 @@ class SuccessFacingBallTermination:
     def __call__(
         self,
         env: ManagerBasedRlEnv,
-        distance_threshold: float = 0.28,
-        facing_cos_threshold: float = 0.94,
-        speed_threshold: float = 0.2,
-        hold_steps: int = 10,
+        min_distance_threshold: float = 0.23,
+        max_distance_threshold: float = 0.35,
+        facing_cos_threshold: float = 0.90,
+        speed_threshold: float = 0.10,
+        hold_steps: int = 6,
     ) -> torch.Tensor:
         robot, _, distance, direction = _ball_relative_xy(env)
 
@@ -292,7 +180,8 @@ class SuccessFacingBallTermination:
 
         hold_steps = max(int(hold_steps), 1)
         success_step = (
-            (distance < distance_threshold)
+            (distance > min_distance_threshold)
+            & (distance < max_distance_threshold)
             & (face_cos > facing_cos_threshold)
             & (speed_xy < speed_threshold)
         )
@@ -323,27 +212,26 @@ def approach_ball_reward(env, asset_cfg: SceneEntityCfg = None) -> torch.Tensor:
     """Potential-style distance reward for being close to ball."""
     del asset_cfg
     _, _, distance, _ = _ball_relative_xy(env)
-    return torch.exp(-distance)
+    distance_for_reward = torch.clamp(distance, min=0.26)
+    return torch.exp(-distance_for_reward)
+
+
+def near_ball_speed_penalty(
+    env,
+    asset_cfg: SceneEntityCfg = None,
+    min_distance: float = 0.23,
+    max_distance: float = 0.35,
+    speed_scale: float = 0.25,
+) -> torch.Tensor:
+    del asset_cfg
+    robot, _, distance, _ = _ball_relative_xy(env)
+    speed_xy = torch.norm(robot.data.root_link_lin_vel_w[:, :2], dim=1)
+    in_band = ((distance > min_distance) & (distance < max_distance)).float()
+    speed_term = torch.clamp(speed_xy / max(speed_scale, 1e-6), max=2.0)
+    return in_band * speed_term
 
 
 def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-    foot_height_scan = TerrainHeightSensorCfg(
-        name="foot_height_scan",
-        frame=(
-            ObjRef(type="site", name="l_foot", entity="robot"),
-            ObjRef(type="site", name="r_foot", entity="robot"),
-        ),
-        ray_alignment="yaw",
-        max_distance=1.0,
-        exclude_parent_body=True,
-        include_geom_groups=(0,),
-        debug_vis=False,
-        viz=TerrainHeightSensorCfg.VizCfg(
-            show_rays=True,
-            hit_color=(1.0, 0.0, 1.0, 0.8),
-            hit_sphere_color=(1.0, 0.0, 1.0, 1.0),
-        ),
-    )
     ##
     # Observations
     ##
@@ -371,32 +259,10 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             noise=Unoise(n_min=-1.5, n_max=1.5),
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
-        "ball_position": ObservationTermCfg(
-            func=ball_position_command,
-        ),
-        "distance_to_ball": ObservationTermCfg(
-            func=distance_to_ball,
-        ),
+        "ball_position": ObservationTermCfg(func=ball_position_command),
+        "distance_to_ball": ObservationTermCfg(func=distance_to_ball),
     }
-    critic_terms = {
-        **actor_terms,
-        "foot_height": ObservationTermCfg(
-            func=mdp.foot_height,
-            params={"sensor_name": "foot_height_scan"},
-        ),
-        "foot_air_time": ObservationTermCfg(
-            func=mdp.foot_air_time,
-            params={"sensor_name": "feet_ground_contact"},
-        ),
-        "foot_contact": ObservationTermCfg(
-            func=mdp.foot_contact,
-            params={"sensor_name": "feet_ground_contact"},
-        ),
-        "foot_contact_forces": ObservationTermCfg(
-            func=mdp.foot_contact_forces,
-            params={"sensor_name": "feet_ground_contact"},
-        ),
-    }
+    critic_terms = {**actor_terms}
     observations = {
         "actor": ObservationGroupCfg(
             terms=actor_terms,
@@ -417,7 +283,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "joint_pos": JointPositionActionCfg(
             entity_name="robot",
             actuator_names=LEG_JOINT_PATTERNS + ANKLE_JOINT_PATTERNS,
-            scale=0.5,
+            scale=0.35,
             use_default_offset=True,
         )
     }
@@ -440,6 +306,73 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "velocity_range": {},
             },
         ),
+        "foot_friction": EventTermCfg(
+            mode="startup",
+            func=dr.geom_friction,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    geom_names=(
+                        "r_ankle_roll_link_collision0",
+                        "r_ankle_roll_link_collision1",
+                        "r_ankle_roll_link_collision2",
+                        "l_ankle_roll_link_collision0",
+                        "l_ankle_roll_link_collision1",
+                        "l_ankle_roll_link_collision2",
+                    ),
+                ),
+                "operation": "abs",
+                "ranges": (0.4, 1.1),
+                "shared_random": True,
+            },
+        ),
+        "encoder_bias": EventTermCfg(
+            mode="startup",
+            func=dr.encoder_bias,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "bias_range": (-0.012, 0.012),
+            },
+        ),
+        "base_com": EventTermCfg(
+            mode="startup",
+            func=dr.body_com_offset,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
+                "operation": "add",
+                "ranges": {
+                    0: (-0.015, 0.015),
+                    1: (-0.015, 0.015),
+                    2: (-0.02, 0.02),
+                },
+            },
+        ),
+        "actuator_pd_gains": EventTermCfg(
+            mode="startup",
+            func=dr.pd_gains,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "kp_range": (0.9, 1.1),
+                "kd_range": (0.9, 1.1),
+                "operation": "scale",
+            },
+        ),
+        "push_robot": EventTermCfg(
+            func=mdp.push_by_setting_velocity,
+            mode="interval",
+            interval_range_s=(1.5, 4.0),
+            params={
+                "velocity_range": {
+                    "x": (-0.15, 0.15),
+                    "y": (-0.15, 0.15),
+                    "z": (-0.1, 0.1),
+                    "roll": (-0.2, 0.2),
+                    "pitch": (-0.2, 0.2),
+                    "yaw": (-0.35, 0.35),
+                },
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        ),
         "reset_robot_joints": EventTermCfg(
             func=mdp.reset_joints_by_offset,
             mode="reset",
@@ -460,12 +393,12 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     "yaw": (-3.14, 3.14),
                 },
                 "velocity_range": {
-                    "x": (0.0, 0.0),
-                    "y": (0.0, 0.0),
+                    "x": (-0.05, 0.05),
+                    "y": (-0.05, 0.05),
                     "z": (0.0, 0.0),
                     "roll": (0.0, 0.0),
                     "pitch": (0.0, 0.0),
-                    "yaw": (0.0, 0.0),
+                    "yaw": (-0.5, 0.5),
                 },
                 "asset_cfg": SceneEntityCfg("ball"),
             },
@@ -525,22 +458,6 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=ANKLE_JOINT_PATTERNS),
                 "std": {".*": 0.08},
-            },
-        ),
-        "foot_pitch_roll_window": RewardTermCfg(
-            func=FootPitchRollWindowReward,
-            weight=1.2,
-            params={
-                "sensor_name": "feet_ground_contact",
-                "asset_cfg": SceneEntityCfg(
-                    "robot",
-                    body_names=("l_ankle_roll_link", "r_ankle_roll_link"),
-                ),
-                "roll_limit_deg": 4.0,
-                "pitch_contact_limit_deg": 6.0,
-                "pitch_swing_limit_deg": 14.0,
-                "toe_off_heel_strike_limit_deg": 12.0,
-                "contact_force_threshold": 25.0,
             },
         ),
         "arm_pose": RewardTermCfg(
@@ -628,30 +545,34 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "threshold_max": 0.45,
             },
         ),
-        "ball_progress": RewardTermCfg(
-            func=BallProgressReward,
-            weight=6.0,
-            params={"progress_scale": 0.02},
-        ),
         "toward_ball_velocity": RewardTermCfg(
             func=toward_ball_velocity_reward,
-            weight=2.0,
-            params={"target_speed": 0.4},
-        ),
-        "face_ball_while_moving": RewardTermCfg(
-            func=face_ball_while_moving_reward,
-            weight=1.5,
-            params={"target_speed": 0.4, "facing_cos_min": 0.5},
+            weight=0.8,
+            params={
+                "target_speed": 0.3,
+                "stop_distance": 0.26,
+                "fade_distance": 0.20,
+                "facing_cos_min": 0.4,
+            },
         ),
         "face_ball_near": RewardTermCfg(
             func=face_ball_near_reward,
-            weight=1.0,
-            params={"near_distance": 0.6, "facing_cos_min": 0.7},
+            weight=1.3,
+            params={"near_distance": 0.6, "facing_cos_min": 0.75},
         ),
         "approach_ball": RewardTermCfg(
             func=approach_ball_reward,
-            weight=1.5,
+            weight=0.5,
             params={},
+        ),
+        "near_ball_speed": RewardTermCfg(
+            func=near_ball_speed_penalty,
+            weight=-2.0,
+            params={
+                "min_distance": 0.23,
+                "max_distance": 0.35,
+                "speed_scale": 0.25,
+            },
         ),
         "success_bonus": RewardTermCfg(
             func=success_bonus,
@@ -677,10 +598,11 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "success_facing_ball": TerminationTermCfg(
             func=SuccessFacingBallTermination,
             params={
-                "distance_threshold": 0.28,
-                "facing_cos_threshold": 0.94,
-                "speed_threshold": 0.2,
-                "hold_steps": 10,
+                "min_distance_threshold": 0.23,
+                "max_distance_threshold": 0.35,
+                "facing_cos_threshold": 0.90,
+                "speed_threshold": 0.10,
+                "hold_steps": 6,
             },
         ),
     }
@@ -719,20 +641,14 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         num_slots=1,
         track_air_time=True,
     )
-    self_collision_cfg = ContactSensorCfg(
-        name="self_collision",
-        primary=ContactMatch(mode="subtree", pattern="base_link", entity="robot"),
-        secondary=ContactMatch(mode="subtree", pattern="base_link", entity="robot"),
-        fields=("found",),
-        reduce="none",
-        num_slots=1,
-    )
     scene = SceneCfg(
         entities={
             "robot": get_piplus_robot_cfg(),
             "ball": get_ball_cfg(),
         },
-        sensors=[feet_contact_sensor_cfg, self_collision_cfg, foot_height_scan],
+        sensors=[
+            feet_contact_sensor_cfg,
+        ],
         terrain=TerrainEntityCfg(
             terrain_type="plane",
             terrain_generator=None,
