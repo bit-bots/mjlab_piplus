@@ -470,6 +470,21 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("ball"),
             },
         ),
+        "push_robot": EventTermCfg(
+            func=mdp.push_by_setting_velocity,
+            mode="interval",
+            interval_range_s=(1.0, 3.0),
+            params={
+                "velocity_range": {
+                    "x": (-0.25, 0.25),
+                    "y": (-0.25, 0.25),
+                    "z": (-0.4, 0.4),
+                    "roll": (-0.52, 0.52),
+                    "pitch": (-0.52, 0.52),
+                    "yaw": (-0.78, 0.78),
+                },
+            },
+        ),
     }
 
     ##
@@ -753,6 +768,7 @@ def piplus_walk_to_ball_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     if play:
         curriculum = {}
+        del events["push_robot"]
 
     ##
     # Assemble the confgi
