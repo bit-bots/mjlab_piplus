@@ -1,20 +1,26 @@
-from pathlib import Path
 import os
-import mujoco
+from pathlib import Path
 
+import mujoco
 from mjlab.actuator import XmlActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.spec_config import CollisionCfg
+
 ##
 # MJCF and assets.
 ##
 
 PIPLUS_XML: Path = Path(os.path.dirname(__file__)) / "piplus/piplus.xml"
+BALL_XML: Path = Path(os.path.dirname(__file__)) / "ball/ball.xml"
 
 
 def get_spec() -> mujoco.MjSpec:
   spec = mujoco.MjSpec.from_file(str(PIPLUS_XML))
   return spec
+
+
+def get_ball_spec() -> mujoco.MjSpec:
+  return mujoco.MjSpec.from_file(str(BALL_XML))
 
 
 ACTUATOR_LAG_MIN = 0
@@ -78,6 +84,12 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
   joint_vel={".*": 0.0},
 )
 
+BALL_INIT = EntityCfg.InitialStateCfg(
+  pos=(1.5, 0.0, 0.10),
+  joint_pos={".*": 0.0},
+  joint_vel={".*": 0.0},
+)
+
 FULL_COLLISION = CollisionCfg(
   geom_names_expr=(r".*_collision[0-9]$",),
   contype=1,
@@ -121,4 +133,11 @@ def get_piplus_robot_cfg() -> EntityCfg:
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
     articulation=PIPLUS_ARTICULATION,
+  )
+
+
+def get_ball_cfg() -> EntityCfg:
+  return EntityCfg(
+    init_state=BALL_INIT,
+    spec_fn=get_ball_spec,
   )

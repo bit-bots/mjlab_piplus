@@ -35,9 +35,7 @@ class time_out_jittered:
   def __init__(self, cfg: TerminationTermCfg, env: ManagerBasedRlEnv) -> None:
     self._env = env
     self._min_fraction: float = cfg.params.get("min_fraction", 0.8)
-    self._horizon = torch.empty(
-      env.num_envs, dtype=torch.long, device=env.device
-    )
+    self._horizon = torch.empty(env.num_envs, dtype=torch.long, device=env.device)
     # Seed across the full range so the first episodes are already staggered.
     self._horizon[:] = torch.randint(
       1, int(env.max_episode_length) + 1, (env.num_envs,), device=env.device

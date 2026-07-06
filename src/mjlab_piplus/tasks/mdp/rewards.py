@@ -297,11 +297,10 @@ def stand_still(
   return reward
 
 
-def feet_clearance_positive(
-  *args, **kwargs
-):
+def feet_clearance_positive(*args, **kwargs):
   r = feet_clearance(*args, **kwargs)
   return 1 - r
+
 
 def feet_clearance(
   env: ManagerBasedRlEnv,

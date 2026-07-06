@@ -2,6 +2,18 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 
 
+def _rotate_xy_w_to_b(
+  xy_w: torch.Tensor,
+  heading_w: torch.Tensor,
+) -> torch.Tensor:
+  cos_h = torch.cos(heading_w)
+  sin_h = torch.sin(heading_w)
+  xy_b = torch.empty_like(xy_w)
+  xy_b[:, 0] = cos_h * xy_w[:, 0] + sin_h * xy_w[:, 1]
+  xy_b[:, 1] = -sin_h * xy_w[:, 0] + cos_h * xy_w[:, 1]
+  return xy_b
+
+
 def phase(
   env: ManagerBasedRlEnv, frequency: float, command_name: str, cmd_threshold: float
 ) -> torch.Tensor:
@@ -34,6 +46,32 @@ def goal_pose_command(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor
   out[:, 2] = torch.cos(command[:, 2])
   out[:, 3] = torch.sin(command[:, 2])
   return out
+
+
+def ball_pos_b(
+  env: ManagerBasedRlEnv,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  """Ball xy position relative to the robot base, expressed in base frame."""
+  robot = env.scene[robot_name]
+  ball = env.scene[ball_name]
+  rel_pos_w = ball.data.root_link_pos_w[:, :2] - robot.data.root_link_pos_w[:, :2]
+  return _rotate_xy_w_to_b(rel_pos_w, robot.data.heading_w)
+
+
+def ball_vel_b(
+  env: ManagerBasedRlEnv,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  """Ball xy velocity relative to the robot root, expressed in base frame."""
+  robot = env.scene[robot_name]
+  ball = env.scene[ball_name]
+  rel_vel_w = (
+    ball.data.root_link_lin_vel_w[:, :2] - robot.data.root_link_lin_vel_w[:, :2]
+  )
+  return _rotate_xy_w_to_b(rel_vel_w, robot.data.heading_w)
 
 
 def zeros(env: ManagerBasedRlEnv, shape) -> torch.Tensor:

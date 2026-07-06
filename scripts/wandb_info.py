@@ -13,8 +13,8 @@ All commands take wandb run IDs (8-char). Entity/project is hardcoded.
 
 from __future__ import annotations
 
-import sys
 import json
+import sys
 
 import wandb
 

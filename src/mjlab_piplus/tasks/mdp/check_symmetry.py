@@ -18,7 +18,11 @@ from __future__ import annotations
 import torch
 from tensordict import TensorDict
 
-from mjlab_piplus.tasks.mdp.symmetry import PiPlusGoalPoseSymmetry, PiPlusSymmetry
+from mjlab_piplus.tasks.mdp.symmetry import (
+  PiPlusGoalPoseSymmetry,
+  PiPlusPassKickSymmetry,
+  PiPlusSymmetry,
+)
 
 N = 8
 ACT_DIM = 12
@@ -72,3 +76,5 @@ def check(label: str, sym, obs_dim: int) -> None:
 check("velocity", PiPlusSymmetry(), 47)
 # Goal-pose: same prefix + 4-dim [dx, dy, cos(yaw), sin(yaw)] command = 48.
 check("goal_pose", PiPlusGoalPoseSymmetry(), 48)
+# Pass/kick: same prefix + 7-dim ball/target command tail = 51.
+check("pass_kick", PiPlusPassKickSymmetry(), 51)

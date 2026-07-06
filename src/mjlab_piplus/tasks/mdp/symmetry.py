@@ -65,6 +65,16 @@ def _transform_obs_goal_pose(obs: torch.Tensor) -> torch.Tensor:
   return obs
 
 
+def _transform_obs_pass_kick(obs: torch.Tensor) -> torch.Tensor:
+  """Pass/kick task: 7-dim ball and target tail at 44:51 (OBS_DIM 51)."""
+  obs = obs.clone()
+  obs = _transform_obs_common(obs)
+  obs[:, 44:51] = obs[:, 44:51] * torch.tensor(
+    [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0], device=obs.device
+  )
+  return obs
+
+
 class PiPlusSymmetry:
   """Callable left-right symmetry function for the PiPlus robot.
 
@@ -115,4 +125,12 @@ class PiPlusGoalPoseSymmetry(PiPlusSymmetry):
 
   obs_transform: Callable[[torch.Tensor], torch.Tensor] = staticmethod(
     _transform_obs_goal_pose
+  )
+
+
+class PiPlusPassKickSymmetry(PiPlusSymmetry):
+  """Symmetry for the pass/kick task layout documented with OBS_DIM 51."""
+
+  obs_transform: Callable[[torch.Tensor], torch.Tensor] = staticmethod(
+    _transform_obs_pass_kick
   )
