@@ -10,8 +10,11 @@ This is a [mjlab](https://github.com/mujocolab/mjlab) project for training RL po
 
 Always use `uv run`, not `python` directly.
 
-```sh
-# Train — launch as a background process via Bash run_in_background=true (NOT tmux), auto-select a free GPU via nvidia-smi
+```bash
+# Setup
+uv sync
+
+# Train — launch long runs in tmux, pick an explicit free GPU via nvidia-smi
 # After launch, poll wandb/ dir for new run-YYYYMMDD_HHMMSS-* directories
 # (verify timestamp matches current time, as runs take time to initialize).
 # Inside the dir, find the run-<id>.wandb file — the ID is in the filename.
@@ -19,14 +22,14 @@ Always use `uv run`, not `python` directly.
 # logs/rsl_rl/piplus_velocity/2026-04-12_23-56-38 — the last segment is the
 # run name. Then prepend a line to runs.log (newest first):
 # <name>: <id>: <short summary>
-uv run train Mjlab-Velocity-PiPlus --env.scene.num-envs 4096 --gpu-ids '[GPU]'
+tmux new-session -d -s train "uv run train Mjlab-Velocity-PiPlus --env.scene.num-envs 4096 --gpu-ids '[GPU]'"
 
-# Play/evaluate a trained policy — launch as a background process via Bash run_in_background=true (NOT tmux), pick a free GPU via nvidia-smi
+# Play/evaluate a trained policy — launch in tmux, pick an explicit free GPU via nvidia-smi
 # Export CUDA_VISIBLE_DEVICES to a single GPU before launching.
 # Prefer unused GPUs; if all busy, pick one with low utilization and free memory.
 # When playing multiple runs, always run them SEQUENTIALLY — wait for each to
 # finish before starting the next, not in parallel.
-CUDA_VISIBLE_DEVICES=GPU uv run play Mjlab-Velocity-PiPlus --wandb-run-path jgueldenstein/mjlab_piplus/<id>
+tmux new-session -d -s play "CUDA_VISIBLE_DEVICES=GPU uv run play Mjlab-Velocity-PiPlus --wandb-run-path jgueldenstein/mjlab_piplus/<id>"
 
 # Sanity-check with dummy agents (no training needed)
 uv run play Mjlab-Velocity-PiPlus --agent zero
@@ -47,11 +50,14 @@ uv run pyright     # thorough
 
 - `src/mjlab_piplus/robot/` — Robot definition: MuJoCo XML spec, actuator configs (PD gains, effort limits, delay), collision configs, and home keyframe pose.
 - `src/mjlab_piplus/tasks/` — Task registration and configs: environment config (observations, rewards, terminations, curriculum) and RL runner config (PPO hyperparameters).
+- Upstream `mjlab` is a uv-managed dependency from `pyproject.toml` (`tool.uv.sources`, rev `v1.5.0`); `rsl_rl` is used through mjlab/RSL-RL configs and is not vendored in this checkout.
 
 
 ### Task registration
 
-Tasks are registered in `src/mjlab_piplus/tasks/__init__.py` via `register_mjlab_task()`. The package entry point `mjlab.tasks` (declared in `pyproject.toml`) causes mjlab's CLI to discover the task automatically. The registered task ID is `"Mjlab-Velocity-PiPlus"`.
+Tasks are registered in `src/mjlab_piplus/tasks/__init__.py` via `register_mjlab_task()`. The package entry point `mjlab.tasks` (declared in `pyproject.toml`) causes mjlab's CLI to discover tasks automatically. The registered task IDs in this checkout are `"Mjlab-Velocity-PiPlus"` and `"Mjlab-GoalPose-PiPlus"`.
+
+Pass/kick work is currently documented/prototyped (`docs/pass_kick_policy.md`, pass/kick symmetry and RL config helpers), but no pass/kick task is registered yet.
 
 ### Robot definition (`piplus_constants.py`)
 
@@ -60,7 +66,7 @@ Three motor series are used:
 - **4438** — arm joints
 - **5036** — leg joints (hip pitch/roll, thigh, calf, ankle pitch/roll), with per-joint tuned PD gains
 
-Each actuator series uses `BuiltinPositionActuatorCfg` with built-in action lag controlled by `ACTUATOR_LAG_MIN` and `ACTUATOR_LAG_MAX` constants (same lag applied to all actuators). The `get_piplus_robot_cfg()` function assembles the full `EntityCfg` with the MuJoCo spec, collision model, and actuator list.
+Each actuator series uses `XmlActuatorCfg` with action delay controlled by `ACTUATOR_LAG_MIN` and `ACTUATOR_LAG_MAX` constants. `PIPLUS_ARTICULATION` currently enables only the leg actuator group (`ACTUATOR_5036`); head and arm actuator groups are defined/commented for future use. The `get_piplus_robot_cfg()` function assembles the full `EntityCfg` with the MuJoCo spec, collision model, and actuator list.
 
 Collision configs (`FULL_COLLISION`, `LEG_ONLY_COLLISION`, `FEET_ONLY_COLLISION`) use regex matching on geom names ending in `_collision[0-9]`.
 
@@ -81,6 +87,7 @@ The function `piplus_velocity_env_cfg(play=False)` builds a `ManagerBasedRlEnvCf
 > **critic obs does NOT need a mirror transform**: under data augmentation the
 > mirrored sample reuses the original's value/return (`V(mirror(s)) == V(s)`),
 > so the value function is only evaluated on the original obs.
+
 - **Sensors**: `ContactSensorCfg` for feet ground contact (ankle roll link subtrees vs. terrain), self-collision sensor, terrain height scan anchored at foot sites.
 - **Curriculum**: velocity command ranges ramp up in two stages, from step 0 to step 800 × 24 (`command_vel`).
 - **Terminations**: time out (20 s episodes), orientation > 45° (`bad_orientation`). The root-height termination is currently commented out.
@@ -89,7 +96,7 @@ The function `piplus_velocity_env_cfg(play=False)` builds a `ManagerBasedRlEnvCf
 
 ### RL config (`piplus_velocity_rl_cfg.py`)
 
-PPO with asymmetric actor-critic (actor/critic each 512-256-128 MLP, ELU activation). Left-right symmetry is enabled via `PiPlusSymmetry` (data augmentation + mirror loss, coeff 0.5). Logs to W&B project `mjlab_piplus`. 24 steps per env per rollout, up to 6 400 iterations, checkpoint every 50 iterations.
+PPO with asymmetric actor-critic (actor/critic each 512-256-128 MLP, ELU activation). Left-right symmetry is enabled via task-specific symmetry configs (data augmentation + mirror loss, coeff 0.5). Logs to W&B project `mjlab_piplus`. 24 steps per env per rollout, up to 3 200 iterations, checkpoint every 200 iterations.
 
 ## Editing conventions
 
