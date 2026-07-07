@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from mjlab.entity import Entity
@@ -11,6 +11,8 @@ from mjlab.utils.lab_api.math import quat_apply_inverse
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+
+  from mjlab_piplus.tasks.mdp.commands import PassKickCommand
 
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
@@ -212,6 +214,7 @@ class feet_swing_height:
       torch.zeros_like(self.peak_heights),
       self.peak_heights,
     )
+
     return cost
 
 
@@ -325,6 +328,336 @@ def feet_clearance(
       active = (total_command > command_threshold).float()
       cost = cost * active
   return cost
+
+
+def _rotate_xy_w_to_b(xy_w: torch.Tensor, heading_w: torch.Tensor) -> torch.Tensor:
+  cos_h = torch.cos(heading_w)
+  sin_h = torch.sin(heading_w)
+  xy_b = torch.empty_like(xy_w)
+  xy_b[:, 0] = cos_h * xy_w[:, 0] + sin_h * xy_w[:, 1]
+  xy_b[:, 1] = -sin_h * xy_w[:, 0] + cos_h * xy_w[:, 1]
+  return xy_b
+
+
+def _pass_kick_state(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+):
+  term = cast("PassKickCommand", env.command_manager.get_term(command_name))
+  robot: Entity = env.scene[robot_name]
+  ball: Entity = env.scene[ball_name]
+  target_pos_w = term.target_pos_w
+  target_radius = term.target_radius
+  ball_pos_w = ball.data.root_link_pos_w[:, :2]
+  ball_vel_w = ball.data.root_link_vel_w[:, :2]
+  robot_pos_w = robot.data.root_link_pos_w[:, :2]
+  robot_vel_w = robot.data.root_link_vel_w[:, :2]
+  target_delta_w = target_pos_w - ball_pos_w
+  target_dist = torch.linalg.norm(target_delta_w, dim=1)
+  ball_delta_w = ball_pos_w - robot_pos_w
+  ball_dist = torch.linalg.norm(ball_delta_w, dim=1)
+  ball_pos_b = _rotate_xy_w_to_b(ball_delta_w, robot.data.heading_w)
+  target_from_ball_b = term.command[:, :2]
+  return (
+    term,
+    target_radius,
+    target_delta_w,
+    target_dist,
+    ball_vel_w,
+    ball_dist,
+    ball_pos_b,
+    target_from_ball_b,
+    robot_vel_w,
+  )
+
+
+class ball_target_progress:
+  """Reward per-step reduction in ball-to-target distance."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    term = cast(
+      "PassKickCommand", env.command_manager.get_term(cfg.params["command_name"])
+    )
+    ball: Entity = env.scene[cfg.params.get("ball_name", "ball")]
+    self.last_dist = torch.linalg.norm(
+      term.target_pos_w - ball.data.root_link_pos_w[:, :2], dim=1
+    )
+    self.last_counter = term.command_counter.clone()
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    max_speed: float = 2.0,
+    success_hold_radius_scale: float = 1.0,
+    robot_name: str = "robot",
+    ball_name: str = "ball",
+  ) -> torch.Tensor:
+    del robot_name
+    term = cast("PassKickCommand", env.command_manager.get_term(command_name))
+    ball: Entity = env.scene[ball_name]
+    target_radius = term.target_radius
+    dist = torch.linalg.norm(
+      term.target_pos_w - ball.data.root_link_pos_w[:, :2], dim=1
+    )
+    progress = self.last_dist - dist
+    command_changed = term.command_counter != self.last_counter
+    progress = torch.where(command_changed, torch.zeros_like(progress), progress)
+    reward = torch.clamp(progress / (max_speed * env.step_dt), max=1.0)
+    success_zone = dist <= target_radius * success_hold_radius_scale
+    reward = torch.where(success_zone, torch.ones_like(reward), reward)
+    self.last_dist = dist
+    self.last_counter = term.command_counter.clone()
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.last_dist[env_ids] = 0.0
+
+
+class approach_ball_progress:
+  """Reward per-step reduction in robot-to-ball distance before the kick."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    robot: Entity = env.scene[cfg.params.get("robot_name", "robot")]
+    ball: Entity = env.scene[cfg.params.get("ball_name", "ball")]
+    self.last_dist = torch.linalg.norm(
+      ball.data.root_link_pos_w[:, :2] - robot.data.root_link_pos_w[:, :2], dim=1
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    max_speed: float = 0.6,
+    active_until_ball_speed: float = 0.15,
+    robot_name: str = "robot",
+    ball_name: str = "ball",
+  ) -> torch.Tensor:
+    (
+      _term,
+      _target_radius,
+      _target_delta_w,
+      _target_dist,
+      ball_vel_w,
+      ball_dist,
+      _ball_pos_b,
+      _target_from_ball_b,
+      _robot_vel_w,
+    ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+    progress = self.last_dist - ball_dist
+    reward = torch.clamp(progress / (max_speed * env.step_dt), max=1.0)
+    ball_speed = torch.linalg.norm(ball_vel_w, dim=1)
+    reward *= (ball_speed < active_until_ball_speed).float()
+    self.last_dist = ball_dist
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.last_dist[env_ids] = 0.0
+
+
+def ball_close_to_target(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  epsilon: float = 3.0,
+  normalize_by_radius: bool = True,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  (
+    _term,
+    target_radius,
+    _target_delta_w,
+    target_dist,
+    _ball_vel_w,
+    _ball_dist,
+    _ball_pos_b,
+    _target_from_ball_b,
+    _robot_vel_w,
+  ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+  if normalize_by_radius:
+    target_dist = target_dist / target_radius.clamp(min=1e-3)
+  return torch.exp(-epsilon * target_dist)
+
+
+def ball_velocity_to_target(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  max_speed: float = 2.0,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  (
+    _term,
+    _target_radius,
+    target_delta_w,
+    target_dist,
+    ball_vel_w,
+    _ball_dist,
+    _ball_pos_b,
+    _target_from_ball_b,
+    _robot_vel_w,
+  ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+  target_dir_w = target_delta_w / target_dist.clamp(min=1e-6).unsqueeze(1)
+  projected_speed = torch.sum(ball_vel_w * target_dir_w, dim=1)
+  return torch.clamp(projected_speed / max_speed, min=0.0, max=1.0)
+
+
+def ball_success(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  max_ball_speed: float = 0.1,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  (
+    _term,
+    target_radius,
+    _target_delta_w,
+    target_dist,
+    ball_vel_w,
+    _ball_dist,
+    _ball_pos_b,
+    _target_from_ball_b,
+    _robot_vel_w,
+  ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+  ball_speed = torch.linalg.norm(ball_vel_w, dim=1)
+  return ((target_dist <= target_radius) & (ball_speed <= max_ball_speed)).float()
+
+
+def ball_speed_near_target(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  max_ball_speed: float = 0.1,
+  near_radius_scale: float = 2.0,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  (
+    _term,
+    target_radius,
+    _target_delta_w,
+    target_dist,
+    ball_vel_w,
+    _ball_dist,
+    _ball_pos_b,
+    _target_from_ball_b,
+    _robot_vel_w,
+  ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+  ball_speed = torch.linalg.norm(ball_vel_w, dim=1)
+  near_target = target_dist <= target_radius * near_radius_scale
+  return torch.clamp(ball_speed - max_ball_speed, min=0.0) * near_target.float()
+
+
+def close_to_ball(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  epsilon: float = 2.0,
+  active_until_ball_speed: float = 0.15,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  (
+    _term,
+    _target_radius,
+    _target_delta_w,
+    _target_dist,
+    ball_vel_w,
+    ball_dist,
+    _ball_pos_b,
+    _target_from_ball_b,
+    _robot_vel_w,
+  ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+  ball_speed = torch.linalg.norm(ball_vel_w, dim=1)
+  return (
+    torch.exp(-epsilon * ball_dist) * (ball_speed < active_until_ball_speed).float()
+  )
+
+
+def ball_in_kick_zone(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  target_x: float = 0.22,
+  target_abs_y: float = 0.08,
+  std_x: float = 0.25,
+  std_y: float = 0.18,
+  active_until_ball_speed: float = 0.15,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  (
+    _term,
+    _target_radius,
+    _target_delta_w,
+    _target_dist,
+    ball_vel_w,
+    _ball_dist,
+    ball_pos_b,
+    _target_from_ball_b,
+    _robot_vel_w,
+  ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+  x_error = (ball_pos_b[:, 0] - target_x) / std_x
+  y_error = (torch.abs(ball_pos_b[:, 1]) - target_abs_y) / std_y
+  ball_speed = torch.linalg.norm(ball_vel_w, dim=1)
+  return (
+    torch.exp(-(x_error**2 + y_error**2))
+    * (ball_speed < active_until_ball_speed).float()
+  )
+
+
+def face_ball_or_target(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  coeff: float = 1.0,
+  switch_distance: float = 0.4,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  (
+    _term,
+    _target_radius,
+    _target_delta_w,
+    _target_dist,
+    _ball_vel_w,
+    ball_dist,
+    ball_pos_b,
+    target_from_ball_b,
+    _robot_vel_w,
+  ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+  ball_bearing = torch.atan2(ball_pos_b[:, 1], ball_pos_b[:, 0])
+  target_bearing = torch.atan2(target_from_ball_b[:, 1], target_from_ball_b[:, 0])
+  bearing = torch.where(ball_dist > switch_distance, ball_bearing, target_bearing)
+  return torch.exp(-coeff * torch.abs(bearing))
+
+
+def standstill_before_kick(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  min_base_speed: float = 0.08,
+  max_ball_distance: float = 1.5,
+  active_until_ball_speed: float = 0.15,
+  distance_std: float = 0.75,
+  robot_name: str = "robot",
+  ball_name: str = "ball",
+) -> torch.Tensor:
+  (
+    _term,
+    _target_radius,
+    _target_delta_w,
+    _target_dist,
+    ball_vel_w,
+    ball_dist,
+    _ball_pos_b,
+    _target_from_ball_b,
+    robot_vel_w,
+  ) = _pass_kick_state(env, command_name, robot_name, ball_name)
+  ball_speed = torch.linalg.norm(ball_vel_w, dim=1)
+  robot_speed = torch.linalg.norm(robot_vel_w, dim=1)
+  active = (ball_dist <= max_ball_distance) & (ball_speed < active_until_ball_speed)
+  speed_cost = torch.clamp(min_base_speed - robot_speed, min=0.0) / min_base_speed
+  distance_scale = torch.exp(-ball_dist / distance_std)
+  return speed_cost * distance_scale * active.float()
 
 
 class goal_progress:

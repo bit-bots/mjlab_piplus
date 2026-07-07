@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -10,7 +10,37 @@ if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.managers.termination_manager import TerminationTermCfg
 
-__all__ = ["time_out_jittered"]
+  from mjlab_piplus.tasks.mdp.commands import PassKickCommand
+
+__all__ = ["ball_out_of_bounds", "pass_kick_success", "time_out_jittered"]
+
+
+def ball_out_of_bounds(
+  env: ManagerBasedRlEnv,
+  ball_name: str = "ball",
+  max_distance_from_origin: float = 6.0,
+) -> torch.Tensor:
+  ball = env.scene[ball_name]
+  pos_xy = ball.data.root_link_pos_w[:, :2]
+  return (
+    torch.linalg.norm(pos_xy - env.scene.env_origins[:, :2], dim=1)
+    > max_distance_from_origin
+  )
+
+
+def pass_kick_success(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  ball_name: str = "ball",
+  max_ball_speed: float = 0.1,
+) -> torch.Tensor:
+  term = cast("PassKickCommand", env.command_manager.get_term(command_name))
+  ball = env.scene[ball_name]
+  target_dist = torch.linalg.norm(
+    term.target_pos_w - ball.data.root_link_pos_w[:, :2], dim=1
+  )
+  ball_speed = torch.linalg.norm(ball.data.root_link_vel_w[:, :2], dim=1)
+  return (target_dist <= term.target_radius) & (ball_speed <= max_ball_speed)
 
 
 class time_out_jittered:

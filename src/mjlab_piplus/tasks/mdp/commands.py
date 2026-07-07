@@ -152,3 +152,122 @@ class GoalPoseCommandCfg(CommandTermCfg):
 
   def build(self, env: ManagerBasedRlEnv) -> GoalPoseCommand:
     return GoalPoseCommand(self, env)
+
+
+def _rotate_xy_w_to_b(xy_w: torch.Tensor, heading_w: torch.Tensor) -> torch.Tensor:
+  cos_h = torch.cos(heading_w)
+  sin_h = torch.sin(heading_w)
+  xy_b = torch.empty_like(xy_w)
+  xy_b[:, 0] = cos_h * xy_w[:, 0] + sin_h * xy_w[:, 1]
+  xy_b[:, 1] = -sin_h * xy_w[:, 0] + cos_h * xy_w[:, 1]
+  return xy_b
+
+
+def _rotate_xy_b_to_w(xy_b: torch.Tensor, heading_w: torch.Tensor) -> torch.Tensor:
+  cos_h = torch.cos(heading_w)
+  sin_h = torch.sin(heading_w)
+  xy_w = torch.empty_like(xy_b)
+  xy_w[:, 0] = cos_h * xy_b[:, 0] - sin_h * xy_b[:, 1]
+  xy_w[:, 1] = sin_h * xy_b[:, 0] + cos_h * xy_b[:, 1]
+  return xy_w
+
+
+class PassKickCommand(CommandTerm):
+  cfg: PassKickCommandCfg
+
+  def __init__(self, cfg: PassKickCommandCfg, env: ManagerBasedRlEnv):
+    super().__init__(cfg, env)
+    self.robot: Entity = env.scene[cfg.robot_name]
+    self.ball: Entity = env.scene[cfg.ball_name]
+
+    self.target_pos_w = torch.zeros(self.num_envs, 2, device=self.device)
+    self.target_radius = torch.zeros(self.num_envs, device=self.device)
+    self.target_command_b = torch.zeros(self.num_envs, 3, device=self.device)
+
+    self.metrics["ball_to_target_dist"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["target_radius"] = torch.zeros(self.num_envs, device=self.device)
+
+  @property
+  def command(self) -> torch.Tensor:
+    return self.target_command_b
+
+  def _update_metrics(self) -> None:
+    ball_pos_w = self.ball.data.root_link_pos_w[:, :2]
+    self.metrics["ball_to_target_dist"] += torch.linalg.norm(
+      self.target_pos_w - ball_pos_w, dim=1
+    )
+    self.metrics["target_radius"] += self.target_radius
+
+  def _resample_command(self, env_ids: torch.Tensor) -> None:
+    n = len(env_ids)
+    target_distance = torch.empty(n, device=self.device).uniform_(
+      *self.cfg.target_distance_range
+    )
+    target_bearing = torch.empty(n, device=self.device).uniform_(
+      *self.cfg.target_bearing_range
+    )
+    target_offset_b = torch.stack(
+      [
+        target_distance * torch.cos(target_bearing),
+        target_distance * torch.sin(target_bearing),
+      ],
+      dim=1,
+    )
+    target_offset_w = _rotate_xy_b_to_w(
+      target_offset_b, self.robot.data.heading_w[env_ids]
+    )
+    self.target_pos_w[env_ids] = (
+      self.ball.data.root_link_pos_w[env_ids, :2] + target_offset_w
+    )
+    self.target_radius[env_ids] = torch.empty(n, device=self.device).uniform_(
+      *self.cfg.target_radius_range
+    )
+
+  def _update_command(self) -> None:
+    target_from_ball_w = self.target_pos_w - self.ball.data.root_link_pos_w[:, :2]
+    target_from_ball_b = _rotate_xy_w_to_b(
+      target_from_ball_w, self.robot.data.heading_w
+    )
+    self.target_command_b[:, :2] = target_from_ball_b
+    self.target_command_b[:, 2] = self.target_radius
+
+  def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
+    env_indices = visualizer.get_env_indices(self.num_envs)
+    if not env_indices:
+      return
+
+    target_pos_ws = self.target_pos_w.cpu().numpy()
+    ball_pos_ws = self.ball.data.root_link_pos_w.cpu().numpy()
+    z = self.cfg.viz.z_offset
+
+    for batch in env_indices:
+      ball_pos_w = ball_pos_ws[batch]
+      if np.linalg.norm(ball_pos_w) < 1e-6:
+        continue
+
+      ball_xyz = np.array([ball_pos_w[0], ball_pos_w[1], z])
+      target_xyz = np.array([target_pos_ws[batch, 0], target_pos_ws[batch, 1], z])
+      visualizer.add_arrow(
+        ball_xyz, target_xyz, color=(0.1, 0.8, 0.2, 0.8), width=0.015
+      )
+
+
+@dataclass(kw_only=True)
+class PassKickCommandCfg(CommandTermCfg):
+  robot_name: str = "robot"
+  ball_name: str = "ball"
+  target_distance_range: tuple[float, float] = (0.5, 3.0)
+  """Distance from the ball to the sampled target point."""
+  target_bearing_range: tuple[float, float] = (-math.pi / 4, math.pi / 4)
+  """Target bearing in the robot base frame."""
+  target_radius_range: tuple[float, float] = (0.15, 0.35)
+  """Acceptable target radius for pass success."""
+
+  @dataclass
+  class VizCfg:
+    z_offset: float = 0.08
+
+  viz: VizCfg = field(default_factory=VizCfg)
+
+  def build(self, env: ManagerBasedRlEnv) -> PassKickCommand:
+    return PassKickCommand(self, env)
