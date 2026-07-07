@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -25,6 +26,9 @@ def reset_ball_around_robot(
   distance_range: tuple[float, float],
   bearing_range: tuple[float, float],
   velocity_range: tuple[float, float] = (0.0, 0.0),
+  velocity_bearing_range: tuple[float, float] = (-math.pi, math.pi),
+  rolling: bool = True,
+  ball_radius: float = 0.1,
   robot_cfg: SceneEntityCfg | None = None,
   ball_cfg: SceneEntityCfg | None = None,
 ) -> None:
@@ -43,15 +47,20 @@ def reset_ball_around_robot(
   )
   offset_w = _rotate_xy_b_to_w(offset_b, robot.data.heading_w[env_ids])
 
-  root_state = ball.data.default_root_state[env_ids].clone()
-  root_state[:, 0:2] = robot.data.root_link_pos_w[env_ids, :2] + offset_w
+  root_pose = ball.data.default_root_state[env_ids, :7].clone()
+  root_pose[:, 0:2] = robot.data.root_link_pos_w[env_ids, :2] + offset_w
 
   speed = torch.empty(n, device=env.device).uniform_(*velocity_range)
-  vel_heading = torch.empty(n, device=env.device).uniform_(-torch.pi, torch.pi)
+  vel_heading = torch.empty(n, device=env.device).uniform_(*velocity_bearing_range)
   vel_b = torch.stack(
     [speed * torch.cos(vel_heading), speed * torch.sin(vel_heading)], dim=1
   )
-  root_state[:, 7:9] = _rotate_xy_b_to_w(vel_b, robot.data.heading_w[env_ids])
-  root_state[:, 9:13] = 0.0
+  lin_vel_w = _rotate_xy_b_to_w(vel_b, robot.data.heading_w[env_ids])
+  root_vel = torch.zeros(n, 6, device=env.device)
+  root_vel[:, 0:2] = lin_vel_w
+  if rolling and ball_radius > 0.0:
+    root_vel[:, 3] = -lin_vel_w[:, 1] / ball_radius
+    root_vel[:, 4] = lin_vel_w[:, 0] / ball_radius
 
-  ball.write_root_state_to_sim(root_state, env_ids=env_ids)
+  ball.write_root_link_pose_to_sim(root_pose, env_ids=env_ids)
+  ball.write_root_link_velocity_to_sim(root_vel, env_ids=env_ids)

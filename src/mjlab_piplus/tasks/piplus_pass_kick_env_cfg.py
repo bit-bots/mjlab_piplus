@@ -206,6 +206,8 @@ def piplus_pass_kick_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "distance_range": (0.25, 0.8),
         "bearing_range": (-math.pi / 4, math.pi / 4),
         "velocity_range": (0.0, 0.05),
+        "rolling": True,
+        "ball_radius": 0.1,
       },
     ),
     "push_robot": EventTermCfg(
@@ -470,6 +472,10 @@ def piplus_pass_kick_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       func=mdp.bad_orientation,
       params={"limit_angle": math.radians(45.0)},
     ),
+    "root_height_below_minimum": TerminationTermCfg(
+      func=mdp.root_height_below_minimum,
+      params={"minimum_height": 0.28},
+    ),
     "ball_out_of_bounds": TerminationTermCfg(
       func=pi_mdp.ball_out_of_bounds,
       params={"ball_name": "ball", "max_distance_from_origin": 6.0},
@@ -491,6 +497,7 @@ def piplus_pass_kick_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "params": {
               "distance_range": (0.25, 0.8),
               "bearing_range": (-math.pi / 4, math.pi / 4),
+              "velocity_range": (0.0, 0.05),
             },
           },
           {
@@ -498,6 +505,7 @@ def piplus_pass_kick_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "params": {
               "distance_range": (0.25, 1.2),
               "bearing_range": (-math.pi / 2, math.pi / 2),
+              "velocity_range": (0.0, 0.15),
             },
           },
           {
@@ -505,6 +513,7 @@ def piplus_pass_kick_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "params": {
               "distance_range": (0.25, 1.5),
               "bearing_range": (-math.pi, math.pi),
+              "velocity_range": (0.0, 0.25),
             },
           },
         ],
