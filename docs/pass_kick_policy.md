@@ -205,6 +205,85 @@ reward = ball_crosses_goal_line_reward
 The stop-near-target version keeps pass and goal-kick semantics unified. The
 goal-crossing version may be more directly aligned with scoring.
 
+## Initial Reward and Training Plan
+
+Train the first pass/kick policy as an approach-and-execute continuation policy,
+not as a stationary kick. The normal walking policy should bring the robot into a
+broad ball area, but this policy should handle the final approach from up to
+about 1.5 m, including imperfect angles, side balls, and balls behind the robot.
+
+Main task rewards:
+
+```text
+ball_target_progress        reward reduction in ball-to-target distance
+ball_close_to_target        reward final proximity to the target
+ball_velocity_to_target     reward ball velocity projected toward the target
+ball_success                bonus when ball is inside target radius and slow
+ball_speed_near_target      penalty for passes that arrive too fast
+```
+
+For pass success, require the ball to be very slow at the target:
+
+```text
+distance(ball, target) < target_radius
+and norm(ball_vel_xy) < 0.1 m/s
+```
+
+Use approach shaping before productive ball motion:
+
+```text
+approach_ball_progress      reward reducing robot-ball distance
+close_to_ball               reward getting into the final approach area
+ball_in_kick_zone           reward a kickable relative ball pose
+face_ball_or_target         reward useful alignment while approaching
+```
+
+Keep the existing walking/goal-pose stability and safety penalties: upright
+base, body angular velocity, angular momentum, termination penalty, joint
+acceleration, joint limits, self-collision, foot slip, and soft landing. Weaken
+posture, gait, and action-rate penalties compared to pure walking so they do not
+suppress the kick motion. Gait shaping should help the approach but should not
+force a walking rhythm during the actual kick.
+
+Add only a small conditional anti-freeze penalty to avoid the policy walking up,
+standing still, and then slowly preparing a kick:
+
+```text
+penalize low base speed only when:
+  ball is within approach/kick range
+  ball has not yet been productively kicked
+  the target command is active
+```
+
+This should be a nudge, not the main learning signal. Time pressure, approach
+progress, and ball progress should drive dynamic kicks.
+
+Warm-start the first pass/kick actor from the walking policy if possible. Since
+the pass/kick actor observation adds ball/target inputs to the shared robot-state
+prefix, copy compatible walking weights and initialize the added input columns
+near zero. This should make the initial policy behave like walking until it
+learns to use the new ball and target inputs.
+
+Recommended curriculum:
+
+```text
+1. Kick discovery:
+   ball near the kick zone, short forward targets, little randomization.
+2. Targeted kick:
+   widen target angle and distance, add target-radius and slow-arrival success.
+3. Approach plus kick:
+   sample ball up to 1.5 m away, randomize robot yaw and walking-like state.
+4. Bad positions:
+   include side and behind-ball starts, then full-circle ball bearings.
+5. Robustness:
+   add ball initial velocity, friction/terrain/randomization, and mild pushes.
+```
+
+Start many episodes from moving walking-like states, with random gait phase,
+recent action history, and small base velocity. If every episode starts from a
+static home pose, the policy will tend to learn a static preparation ritual
+instead of a smooth handoff from walking.
+
 ## Symmetry Considerations
 
 If symmetry augmentation is used, the added task inputs must be mirrored
