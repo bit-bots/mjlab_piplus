@@ -1,0 +1,84 @@
+# Short pass/kick training queue for scripts/run_experiments.py
+#
+#   uv run scripts/run_experiments.py experiments.passkick.yaml --dry-run
+#   uv run scripts/run_experiments.py experiments.passkick.yaml
+#   uv run scripts/run_experiments.py experiments.passkick.yaml --only curriculum_sanity
+#
+# Experiments are pulled from a central queue by one worker per target
+# (work-stealing): whichever GPU frees up first runs the next experiment.
+# Remote (ssh) runs execute in a detached tmux session, so they keep going if
+# the ssh connection drops; the orchestrator reconnects to track them. Each
+# remote host therefore needs tmux and uv installed.
+
+task: Mjlab-PassKick-PiPlus
+
+# Default project path, used by any target that doesn't set its own
+# project_dir. Optional if every target specifies project_dir.
+project_dir: /homes/21griepen/mjlab_piplus
+
+# Optional extra flags passed to ssh (applied to all non-local targets).
+ssh_opts: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+
+# How the orchestrator polls remote tmux sessions for completion.
+poll_interval: 30          # seconds between polls
+max_poll_failures: 40      # give up tracking (run stays in tmux) after this many
+
+# A target's GPU must be free before a run starts there. Workers wait and
+# re-check until the GPU has >= min_free_mem_mb free and <= max_util_pct usage.
+min_free_mem_mb: 10000     # require at least this much free VRAM (MB)
+max_util_pct: 30           # and utilization at or below this (%)
+gpu_check_interval: 30     # seconds between GPU free-checks while waiting
+
+# Applied to every experiment; per-experiment `args` override these.
+# Keys are tyro flags without the leading `--`. Do NOT set gpu-ids here.
+common_args:
+  # 2048 envs is large enough for PPO to get a meaningful signal, but keeps
+  # this first real pass/kick run much cheaper than the full 4096-env setup.
+  env.scene.num-envs: 2048
+  agent.num-steps-per-env: 24
+  agent.max-iterations: 850
+  agent.save-interval: 100
+  # Tensorboard avoids remote wandb/login issues for this setup validation run.
+  agent.logger: tensorboard
+
+# Static host:gpu list. host "local" runs without ssh. Hostnames must be
+# resolvable (e.g. via ~/.ssh/config — tams* jumps through `uni`). Set
+# project_dir per target when the mjlab checkout lives at a different path on
+# that machine; otherwise the top-level project_dir is used.
+targets:
+  - {host: local, gpu: 0}
+  # - {host: cl05, gpu: 0, project_dir: /homes/21griepen/mjlab_piplus}
+  # - {host: cl06, gpu: 0, project_dir: /homes/21griepen/mjlab_piplus}
+  # - {host: cl07, gpu: 0, project_dir: /homes/21griepen/mjlab_piplus}
+  # - {host: othermachine, gpu: 0, project_dir: /data/me/mjlab_piplus}
+
+experiments:
+  # Main setup validation run. This reaches the first reset curriculum stage
+  # at 800 iterations, so it verifies that training survives the transition
+  # from close/front ball placements to wider approach angles.
+  - name: curriculum_sanity
+    args: {}
+
+  # Same task, but with a bit more pressure against stopping before contact and
+  # a higher approach/progress signal. Useful for detecting whether the policy
+  # can learn a more dynamic pass/kick without immediately sacrificing balance.
+  - name: dynamic_kick_pressure
+    args:
+      agent.max-iterations: 650
+      env.rewards.standstill_before_kick.weight: -0.2
+      env.rewards.ball_target_progress.weight: 2.5
+      env.rewards.approach_ball_progress.weight: 0.75
+      env.rewards.ball_in_kick_zone.weight: 0.75
+
+  # Short robustness probe. Keep it shorter than the main run: this is meant to
+  # expose obvious stability problems under stronger pushes, not to become the
+  # final robust policy.
+  - name: moderate_push_probe
+    args:
+      agent.max-iterations: 450
+      env.events.push_robot.params.velocity_range.x: [-0.25, 0.25]
+      env.events.push_robot.params.velocity_range.y: [-0.25, 0.25]
+      env.events.push_robot.params.velocity_range.z: [-0.12, 0.12]
+      env.events.push_robot.params.velocity_range.roll: [-0.5, 0.5]
+      env.events.push_robot.params.velocity_range.pitch: [-0.5, 0.5]
+      env.events.push_robot.params.velocity_range.yaw: [-0.7, 0.7]
