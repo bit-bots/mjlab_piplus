@@ -24,7 +24,7 @@ import numpy as np
 class ControllerConfig:
   """Parameters for the follow-the-carrot path controller."""
 
-  carrot_distance: int = 75
+  carrot_distance: int = 100
   """Index offset from the closest path point to the carrot the robot walks
   toward. Paths are sampled at a fixed arc-length spacing, so this is a fixed
   look-ahead distance (e.g. 50 points x 1 cm spacing = 0.5 m ahead)."""

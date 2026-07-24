@@ -12,6 +12,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "mjlab",
     "onnxruntime",
+    "pandas>=3.0.5",
     "wandb>=0.28.1",
 ]
 

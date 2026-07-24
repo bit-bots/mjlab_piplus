@@ -225,12 +225,12 @@ def piplus_velocity_env_cfg(
         # x/y start small and are ramped up by the ``push_velocity`` curriculum
         # (below); z/roll/pitch/yaw are left untouched by the curriculum.
         "velocity_range": {
-          "x": (-0.25, 0.25),
-          "y": (-0.25, 0.25),
-          "z": (-0.15, 0.15),
-          "roll": (-0.52, 0.52),
-          "pitch": (-0.52, 0.52),
-          "yaw": (-0.78, 0.78),
+          "x": (-0.75, 0.75),
+          "y": (-0.75, 0.75),
+          "z": (-0.0, 0.0),
+          "roll": (-0.8, 0.8),
+          "pitch": (-0.8, 0.8),
+          "yaw": (-0.0, 0.0),
         },
       },
     ),
@@ -672,7 +672,7 @@ def piplus_velocity_env_cfg(
     events = {  # remove other dr in play mode
       "reset_base": events["reset_base"],
       "reset_robot_joints": events["reset_robot_joints"],
-      # "push_robot": events["push_robot"],
+      #"push_robot": events["push_robot"],
       # "astroturf_softness": events["astroturf_softness"],
     }
     # events["astroturf_softness"].params["ranges"] = (0.155, 0.155)
