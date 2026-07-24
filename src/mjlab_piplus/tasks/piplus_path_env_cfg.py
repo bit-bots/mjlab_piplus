@@ -18,9 +18,17 @@ from mjlab_piplus.tasks.mdp.path_following import (
 )
 from mjlab_piplus.tasks.piplus_velocity_env_cfg import piplus_velocity_env_cfg
 
+# Goal-reward success thresholds — the single source of truth for what "reaching
+# the goal pose" means. Used both for the logged training success rate (the
+# goal_reached_* rewards) and, in eval mode, for the path command's "goal reached"
+# reset (position at the base footprint + yaw error to the goal orientation). The
+# comparison env imports these so the velocity-policy eval uses the same limits.
+GOAL_POS_SUCCESS = 0.1  # meters (footprint distance to the goal)
+GOAL_YAW_SUCCESS = 0.2  # radians (heading error to the goal yaw)
+
 
 def piplus_path_env_cfg(
-  play: bool = False, static: bool = False, obstacles: bool = False
+  play: bool = False, static: bool = False, obstacles: bool = False, eval: bool = False
 ) -> ManagerBasedRlEnvCfg:
   """Path-following env.
 
@@ -30,6 +38,11 @@ def piplus_path_env_cfg(
       robot has to walk corners and detours. The obstacles themselves are
       virtual — drawn in the viewer, never simulated — so nothing about the
       scene, contacts or terminations changes.
+    eval: If True (play only), put the path command in eval mode: iterate the
+      path library deterministically and log per-step metrics to
+      ``path_logs*.csv`` / ``commands_path.csv``. Pair with
+      ``Mjlab-PathComparison-PiPlus`` (velocity policy, ``velo_logs*``) to
+      compare the two policies over the identical paths.
   """
   # Start from the velocity task; change only what the path task needs.
   cfg = piplus_velocity_env_cfg(play=play, static=static)
@@ -44,6 +57,9 @@ def piplus_path_env_cfg(
     debug_vis=True,
     resampling_time_range=(1.0e6, 1.0e6),
     num_observations=8,
+    # Eval "goal reached" limits = the training goal-reward success thresholds.
+    goal_pos_threshold=GOAL_POS_SUCCESS,
+    goal_yaw_threshold=GOAL_YAW_SUCCESS,
   )
   if obstacles:
     cfg.commands["path"].generator = "astar"
@@ -97,7 +113,7 @@ def piplus_path_env_cfg(
       "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
       "foot_asset_cfg": foot_asset_cfg,
       "pos_std": 0.25,  # Gaussian width on goal distance (m).
-      "success_threshold": 0.05,  # logged success-rate metric only.
+      "success_threshold": GOAL_POS_SUCCESS,  # logged success-rate metric only.
     },
   )
   cfg.rewards["goal_reached_angular_reward"] = RewardTermCfg(
@@ -109,7 +125,7 @@ def piplus_path_env_cfg(
       "foot_asset_cfg": foot_asset_cfg,
       "pos_std": 0.25,  # position gate width (m); matches the linear term.
       "yaw_std": 0.5,  # Gaussian width on goal-yaw error (rad).
-      "success_yaw_threshold": 0.2,  # logged success-rate metric only.
+      "success_yaw_threshold": GOAL_YAW_SUCCESS,  # logged success-rate metric only.
     },
   )
   cfg.rewards["close_to_path_reward"] = RewardTermCfg(
@@ -176,6 +192,9 @@ def piplus_path_env_cfg(
     if obstacles:
       # Keep the play library small enough to generate in a few seconds, but
       # not so small that every episode shows the same worlds.
-      cfg.commands["path"].pathlib_size = 200
+      cfg.commands["path"].pathlib_size = 100
+    if eval:
+      # Deterministic path iteration + metric logging for the comparison.
+      cfg.commands["path"].eval_mode = True
 
   return cfg

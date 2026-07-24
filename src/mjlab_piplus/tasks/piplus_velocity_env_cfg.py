@@ -222,9 +222,11 @@ def piplus_velocity_env_cfg(
       mode="interval",
       interval_range_s=(2.0, 6.0),
       params={
+        # x/y start small and are ramped up by the ``push_velocity`` curriculum
+        # (below); z/roll/pitch/yaw are left untouched by the curriculum.
         "velocity_range": {
-          "x": (-1.0, 1.0),
-          "y": (-1.0, 1.0),
+          "x": (-0.25, 0.25),
+          "y": (-0.25, 0.25),
           "z": (-0.15, 0.15),
           "roll": (-0.52, 0.52),
           "pitch": (-0.52, 0.52),
@@ -440,14 +442,7 @@ def piplus_velocity_env_cfg(
         # feet rewards, which otherwise favor a wide, push-stable leg spread.
         # Patterns must be non-overlapping (resolve_matching_names_values raises
         # on a joint matching two keys) and cover all leg joints.
-        "std_standing": {
-          r".*_hip_pitch_joint": 0.05,
-          r".*_hip_roll_joint": 0.02,
-          r".*_thigh_joint": 0.05,
-          r".*_calf_joint": 0.05,
-          r".*_ankle_pitch_joint": 0.05,
-          r".*_ankle_roll_joint": 0.05,
-        },
+        "std_standing": {r".*": 0.05,},
         "std_walking": {
           r".*_hip_pitch_joint": 0.35,
           r".*_hip_roll_joint": 0.15,

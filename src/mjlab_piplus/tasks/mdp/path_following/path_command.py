@@ -12,6 +12,7 @@ import torch
 from mjlab.entity.entity import Entity
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 if TYPE_CHECKING:
   from mjlab.viewer.debug_visualizer import DebugVisualizer
@@ -58,6 +59,13 @@ def _add_box(
 
 
 class PathCommand(CommandTerm):
+  # Eval-mode log filenames. Subclasses evaluating a *different* policy on the
+  # same paths (e.g. ``VelocityPathCommand``) override these so their metrics
+  # land in separate files; the path library and iteration order are shared, so
+  # both policies are compared on identical paths.
+  _commands_csv = "commands_path.csv"
+  _log_prefix = "path_logs"
+
   def __init__(self, cfg: PathCommandCfg, env: ManagerBasedRlEnv):
     super().__init__(cfg, env)
     self.robot: Entity = env.scene[cfg.entity_name]
@@ -99,6 +107,12 @@ class PathCommand(CommandTerm):
     self.at_goal_time = torch.zeros(self.num_envs, device=self.device)
     # Twist command whose stand flag we drive near the goal (resolved lazily).
     self._twist_term = None
+    # Resolve the foot sites once so the eval "goal reached" check can measure
+    # goal distance at the base footprint (feet midpoint), exactly as the
+    # training goal-reward does (see ``path_reward.base_footprint_xy``).
+    foot_cfg = SceneEntityCfg(cfg.entity_name, site_names=cfg.foot_site_names)
+    foot_cfg.resolve(env.scene)
+    self._foot_site_ids = foot_cfg.site_ids
     self._update_robot_pose()
 
   def _generate(
@@ -189,14 +203,39 @@ class PathCommand(CommandTerm):
     return self.command_b
 
   def _resample_command(self, env_ids):
+    # In eval mode, tell apart a resample caused by the command *timeout* from one
+    # caused by an env reset: CommandTerm.reset() zeroes command_counter *before*
+    # resampling, whereas the periodic (timeout) path in compute() does not. So a
+    # nonzero command_counter here means the 30 s command timeout fired without the
+    # robot reaching the goal — reset the env so it restarts the next path from the
+    # origin instead of continuing from wherever it stalled. That env reset
+    # re-enters this method with command_counter zeroed and does the path selection
+    # + global_command_counter increment, so we return early here to avoid
+    # advancing the counter twice (which would skip a path). Goal-reached /
+    # fell-over / startup resets all arrive here with command_counter already 0 and
+    # fall through to the normal body.
+    if self.cfg.eval_mode and bool((self.command_counter[env_ids] != 0).any()):
+      self._env.reset()
+      return
     self.starting_step = self._env.common_step_counter
     self._update_robot_pose()
     # New goal: reset the dwell timer so accumulated time doesn't carry over.
     self.at_goal_time[env_ids] = 0.0
-    # Sample a fresh random goal orientation (world yaw) for the new paths.
-    self.goal_yaw_w[env_ids] = torch.empty(
-      len(env_ids), device=self.device
-    ).uniform_(*self.cfg.goal_yaw_range)
+    # Goal orientation (world yaw) for the new paths. In eval mode make it a
+    # deterministic function of the path index (which is iterated deterministically
+    # too), so a path-policy run and a velocity-policy run see the *same* goal
+    # pose for each path and the comparison stays fair. Otherwise sample randomly.
+    if self.cfg.eval_mode:
+      idx = self.global_command_counter % self.cfg.pathlib_size
+      lo, hi = self.cfg.goal_yaw_range
+      goal_yaw = float(
+        np.random.default_rng(self.cfg.goal_yaw_seed + idx).uniform(lo, hi)
+      )
+      self.goal_yaw_w[env_ids] = goal_yaw
+    else:
+      self.goal_yaw_w[env_ids] = torch.empty(
+        len(env_ids), device=self.device
+      ).uniform_(*self.cfg.goal_yaw_range)
     if self.cfg.use_pathlib:
       if self.cfg.eval_mode:
         indices = torch.tensor(
@@ -233,7 +272,7 @@ class PathCommand(CommandTerm):
 
     if self.cfg.eval_mode:
       # write waypoints to csv
-      with open("commands_path.csv", "a") as f:
+      with open(self._commands_csv, "a") as f:
         for i in range(self.waypoints.shape[0]):
           waypoint_str = ",".join(
             [f"{x:.2f}" for x in self.waypoints[i].cpu().numpy().flatten()]
@@ -348,28 +387,67 @@ class PathCommand(CommandTerm):
     #self._set_twist_stand(stand)
 
     if self.cfg.eval_mode:
-      # hacky calculate metrics
-      closest_dists = torch.min(dists, dim=-1).values  # (num_envs,)
-      closest_waypoints = self.paths[:, closest_indices]  # (num_envs, 2)
-      next_indices = torch.clamp(closest_indices + 1, max=self.paths.shape[1] - 1)
-      next_waypoints = self.paths[:, next_indices]  # (num_envs, 2)
-      path_tangents = next_waypoints - closest_waypoints  # (num_envs, 2)
-      path_headings = torch.atan2(
-        path_tangents[..., 1], path_tangents[..., 0]
-      )  # (num_envs,)
-      robot_headings = self.current_pose[:, 2]
-      abs_angle_diff = torch.abs(angle_distance(robot_headings, path_headings))
-      distances_to_goal = torch.norm(self.waypoints[:, -1, :] - root_pos, dim=-1)
-      with open(f"path_logs{self.global_command_counter:03d}.csv", "a") as f:
-        f.write(
-          f"{self.starting_step},{self._env.common_step_counter},"
-          f"{closest_dists.item()},{abs_angle_diff.item()},"
-          f"{distances_to_goal.item()}\n"
-        )
+      self._log_eval_metrics(dists, closest_indices, root_pos)
 
-      if distances_to_goal.item() < 0.15:
-        print("Reached goal, resetting env")
-        self._env.reset()
+  def _footprint_xy(self) -> torch.Tensor:
+    """World-frame xy of the base footprint (midpoint of the two foot sites).
+
+    Matches ``path_reward.base_footprint_xy`` — the position the training
+    goal-reward is measured at — so the eval "goal reached" check uses the same
+    reference. Returns a ``(num_envs, 2)`` tensor.
+    """
+    foot_xy = self.robot.data.site_pos_w[:, self._foot_site_ids, :2]
+    return foot_xy.mean(dim=1)
+
+  def _log_eval_metrics(
+    self,
+    dists: torch.Tensor,
+    closest_indices: torch.Tensor,
+    root_pos: torch.Tensor,
+  ) -> None:
+    """Append per-step path-following metrics and reset once the goal pose is hit.
+
+    Logs ``starting_step, step, dist_to_path, |heading_err_vs_tangent|,
+    dist_to_goal, yaw_err_to_goal`` to ``{_log_prefix}{counter}.csv`` (one row
+    per step). ``dist_to_goal`` is the base-footprint distance to the final
+    waypoint and ``yaw_err_to_goal`` is ``|wrap(goal_yaw - heading)|`` — the same
+    two quantities the training goal-reward thresholds on.
+
+    Shared by ``PathCommand`` (path policy) and ``VelocityPathCommand`` (velocity
+    policy) so both are scored with the exact same metric on the exact same
+    paths. Assumes a single env (``.item()`` calls) — this only runs at
+    eval/play time.
+    """
+    del root_pos  # Goal distance is measured at the footprint (matches training).
+    env_ar = torch.arange(self.num_envs, device=self.device)
+    closest_dists = torch.min(dists, dim=-1).values  # (num_envs,)
+    next_indices = torch.clamp(closest_indices + 1, max=self.paths.shape[1] - 1)
+    closest_waypoints = self.paths[env_ar, closest_indices][..., :2]  # (num_envs, 2)
+    next_waypoints = self.paths[env_ar, next_indices][..., :2]  # (num_envs, 2)
+    path_tangents = next_waypoints - closest_waypoints  # (num_envs, 2)
+    path_headings = torch.atan2(
+      path_tangents[..., 1], path_tangents[..., 0]
+    )  # (num_envs,)
+    robot_headings = self.current_pose[:, 2]
+    abs_angle_diff = torch.abs(angle_distance(robot_headings, path_headings))
+    # Goal-reached criterion, matching training's goal-reward success metric:
+    # base-footprint distance to the goal AND yaw error to the sampled goal yaw.
+    dist_to_goal = torch.norm(self.waypoints[:, -1, :] - self._footprint_xy(), dim=-1)
+    yaw_err = self.yaw_err.abs()
+    with open(f"{self._log_prefix}{self.global_command_counter:03d}.csv", "a") as f:
+      f.write(
+        f"{self.starting_step},{self._env.common_step_counter},"
+        f"{closest_dists.item()},{abs_angle_diff.item()},"
+        f"{dist_to_goal.item()},{yaw_err.item()}\n"
+      )
+
+    goal_reached = (dist_to_goal < self.cfg.goal_pos_threshold) & (
+      yaw_err < self.cfg.goal_yaw_threshold
+    )
+    if goal_reached.item():
+      print("Reached goal pose, resetting env")
+      print(f"{self.global_command_counter}/{self.cfg.pathlib_size} paths completed")
+      self._env.reset()
 
   def _draw_obstacles(self, visualizer: DebugVisualizer, batch: int) -> None:
     """Draw the (virtual) obstacle world the path was planned through.
@@ -441,6 +519,22 @@ class PathCommandCfg(CommandTermCfg):
   observation_spacing: int = 15  # Spacing between observed path points.
   goal_yaw_range: tuple[float, float] = (-math.pi, math.pi)
   """Range (radians) from which the goal orientation (world yaw) is sampled."""
+  goal_yaw_seed: int = 0
+  """Base seed for the deterministic per-path goal yaw used in ``eval_mode`` (so a
+  path-policy run and a velocity-policy run get the same goal pose for each
+  path). Ignored outside eval mode, where the goal yaw is sampled randomly."""
+  foot_site_names: tuple[str, ...] = ("l_foot", "r_foot")
+  """Foot sites whose midpoint is the base footprint — the position the eval
+  "goal reached" check measures, matching the training goal-reward."""
+  goal_pos_threshold: float = 0.05
+  """Eval "goal reached" position limit (m): base-footprint distance to the final
+  waypoint under which the goal position counts as reached. Defaults to the
+  training goal-reward success threshold (``goal_reached_linear``)."""
+  goal_yaw_threshold: float = 0.2
+  """Eval "goal reached" orientation limit (rad): ``|wrap(goal_yaw - heading)|``
+  under which the goal orientation counts as reached. Both this and
+  ``goal_pos_threshold`` must hold to trigger the reset. Defaults to the training
+  goal-reward success threshold (``goal_reached_angular``)."""
   near_goal_threshold: float = 0.3
   """Distance (m) to the final waypoint under which the robot is "near the goal":
   the progress/alignment rewards saturate to their max so the robot is not
