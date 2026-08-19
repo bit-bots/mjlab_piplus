@@ -336,12 +336,12 @@ class LogAnalyzer:
             plt.xlabel('Time to Goal (seconds)')
             #plt.ylabel('Folder')
             plt.tight_layout()
-            plt.title('Time to Goal Distribution (successful runs only)')
+            #plt.title('Time to Goal Distribution (successful runs only)')
             plt.grid(True, alpha=0.3, axis='x')
         else:
             # For single folder, still use histogram
             plt.hist(success_df['time_to_goal_s'], bins=20, alpha=0.7, color=colors[0], orientation='horizontal')
-            plt.title('Time to Goal Distribution (successful runs only)')
+            #plt.title('Time to Goal Distribution (successful runs only)')
             plt.xlabel('Frequency')
             plt.ylabel('Time to Goal (seconds)')
             plt.grid(True, alpha=0.3, axis='x')
@@ -455,16 +455,16 @@ class LogAnalyzer:
 
             # Set y-axis labels to folder names with custom positions
             plt.yticks(plot_positions, plot_labels)
-            plt.xlabel('Mean Distance to Path')
+            plt.xlabel('Mean Distance to Path (m)')
             #plt.ylabel('Folder')
-            plt.title('Mean Distance to Path Distribution (successful runs only)')
+            #plt.title('Mean Distance to Path Distribution (successful runs only)')
             plt.grid(True, alpha=0.3, axis='x')
         else:
             # For single folder, still use histogram
             plt.hist(success_df['avg_distance_to_path'], bins=20, alpha=0.7, color=colors[0], orientation='horizontal')
-            plt.title('Mean Distance to Path Distribution (successful runs only)')
+            #plt.title('Mean Distance to Path Distribution (successful runs only)')
             plt.xlabel('Frequency')
-            plt.ylabel('Mean Distance to Path')
+            plt.ylabel('Mean Distance to Path (m)')
             plt.grid(True, alpha=0.3, axis='x')
         plt.tight_layout()
         if save_plots:
