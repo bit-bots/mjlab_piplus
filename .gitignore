@@ -211,3 +211,5 @@ __marimo__/
 
 # Cached path library (regenerated on demand, keyed on gen params)
 **/path_cache/**
+
+plots/
