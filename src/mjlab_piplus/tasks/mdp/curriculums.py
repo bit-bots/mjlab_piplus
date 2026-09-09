@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 __all__ = [
   "EventCurriculumStage",
   "event_curriculum",
+  "event_param_linear",
   "GoalRadiusStage",
   "commands_goal_radius",
   "RewardWeightStage",
@@ -152,6 +153,60 @@ def event_curriculum(
       result[k + "_max"] = torch.tensor(v[1])
     elif isinstance(v, torch.Tensor):
       result[k] = v
+  return result
+
+
+def event_param_linear(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor,
+  event_name: str,
+  start_step: int,
+  end_step: int,
+  start_params: dict[str, float | tuple[float, ...]],
+  end_params: dict[str, float | tuple[float, ...]],
+) -> dict[str, torch.Tensor]:
+  """Ramp an event term's params linearly over training steps.
+
+  The linear counterpart of :func:`event_curriculum`, which steps its params at
+  stage boundaries. A disturbance is the case that wants the ramp: a step change
+  in push strength arrives as a cliff the policy has to re-learn through, while
+  a ramp keeps every push only slightly harder than the last one it survived.
+
+  ``start_params`` and ``end_params`` must carry the same keys, and each pair of
+  values must be the same shape -- a scalar, or a tuple interpolated
+  element-wise (so a ``(min, max)`` range can grow at either end, or only at the
+  top). Holds ``start_params`` until ``start_step`` and ``end_params`` after
+  ``end_step``.
+  """
+  del env_ids  # Unused.
+  if start_params.keys() != end_params.keys():
+    raise KeyError(
+      f"start_params and end_params must name the same params; got "
+      f"{sorted(start_params)} vs {sorted(end_params)}."
+    )
+  step = env.common_step_counter
+  frac = min(max((step - start_step) / max(end_step - start_step, 1), 0.0), 1.0)
+
+  event_term_cfg = env.event_manager.get_term_cfg(event_name)
+  result: dict[str, torch.Tensor] = {}
+  for name, start in start_params.items():
+    end = end_params[name]
+    if isinstance(start, (int, float)) != isinstance(end, (int, float)):
+      raise TypeError(f"param '{name}': start and end must be the same shape.")
+    if isinstance(start, (int, float)):
+      assert isinstance(end, (int, float))
+      value: float | tuple[float, ...] = start + frac * (end - start)
+      result[name] = torch.tensor(value)
+    else:
+      if len(start) != len(end):
+        raise ValueError(
+          f"param '{name}': start and end have different lengths "
+          f"({len(start)} vs {len(end)})."
+        )
+      value = tuple(lo + frac * (hi - lo) for lo, hi in zip(start, end, strict=True))
+      for i, v in enumerate(value):
+        result[f"{name}_{i}"] = torch.tensor(v)
+    event_term_cfg.params[name] = value
   return result
 
 

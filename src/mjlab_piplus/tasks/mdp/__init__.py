@@ -8,6 +8,7 @@ from mjlab_piplus.tasks.mdp.metrics import *
 from mjlab_piplus.tasks.mdp.multi_command import *
 from mjlab_piplus.tasks.mdp.multi_rewards import *
 from mjlab_piplus.tasks.mdp.observations import *
+from mjlab_piplus.tasks.mdp.push import *
 from mjlab_piplus.tasks.mdp.push_gui import *
 from mjlab_piplus.tasks.mdp.rewards import *
 from mjlab_piplus.tasks.mdp.symmetry import *

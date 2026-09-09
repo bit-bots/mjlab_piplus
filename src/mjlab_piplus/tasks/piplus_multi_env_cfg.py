@@ -113,6 +113,24 @@ MAX_COMMANDED_SPEED = 0.8
 KICK_DIR_SIGMA_START = math.radians(60.0)
 KICK_DIR_SIGMA_END = math.radians(20.0)
 
+# Push strength, ramped by ``ramp_push`` below. A push is one kind at a time --
+# a horizontal shove at ``PUSH_LINEAR_*`` m/s, or a spin about a horizontal axis
+# at ``PUSH_ANGULAR_*`` rad/s -- so these are the speed of the disturbance
+# itself, not per-axis components of a mixed one (see ``mdp/push.py``). The
+# starts are the strengths the previous box-sampled push term topped out at:
+# 0.25 m/s per horizontal axis and the 0.52 rad/s it allowed in roll and pitch.
+# Sampled from 0 to the current ceiling, so a ramp adds harder pushes without
+# taking the gentle ones away.
+PUSH_LINEAR_START = 0.25
+PUSH_LINEAR_END = 0.6
+PUSH_ANGULAR_START = 0.4
+PUSH_ANGULAR_END = 0.8
+# Held at the start values while the policy is still learning to walk at all,
+# then ramped over the middle of training, leaving ~1400 iterations at full
+# strength for the gait to settle under it.
+PUSH_RAMP_START_STEP = 1000 * 24
+PUSH_RAMP_END_STEP = 5000 * 24
+
 # Weight presets, spelled out so a reward's applicability reads at a glance.
 _OFF = {
   "velocity": 0.0,
@@ -131,6 +149,7 @@ KICK_ONLY = {**_OFF, "kick": 1.0}
 # pose is most of what "stand" asks for, while under the moving commands the same
 # term pulls against the gait and stays at its nominal weight.
 STAND_BOOSTED = {name: 1.0 for name in _OFF} | {"stand": 3.0}
+ALL = {name: 1.0 for name in _OFF}
 
 # Number of future path points in the command observation.
 NUM_PATH_OBSERVATIONS = 8
@@ -318,11 +337,11 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       debug_vis=True,
       change_command_probability=0.3,
       fractions={
-        "velocity": 0.2,
+        "velocity": 0.25,
         "path": 0.15,
         "goal_pose": 0.15,
         "footstep": 0.15,
-        "kick": 0.25,
+        "kick": 0.2,
         "stand": 0.10,
       },
       terms={
@@ -368,8 +387,8 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
           resampling_time_range=(8.0, 16.0),
           # Placed within a 60 degree fan either side of where the robot is
           # facing, at most 1.2 m away whatever the bearing.
-          distance_range=(0.3, 1.2),
-          placement_cone_deg=60.0,
+          distance_range=(0.15, 1.2),
+          placement_cone_deg=135.0,
           # Target direction within this cone of the robot's heading at
           # placement -- a direction it can plausibly hit from where it stands.
           # Widen towards 180 once kicking works to demand turning the ball.
@@ -528,19 +547,19 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
       },
     ),
+    # One disturbance per push: a horizontal shove, or a spin about a
+    # horizontal axis, each with its own direction and magnitude. Not mjlab's
+    # ``push_by_setting_velocity``, which draws all six twist components at
+    # once and so never delivers either kind cleanly. Strengths are ramped by
+    # ``ramp_push``.
     "push_robot": EventTermCfg(
-      func=mdp.push_by_setting_velocity,
+      func=pi_mdp.push_by_velocity_delta,
       mode="interval",
       interval_range_s=(2.0, 6.0),
       params={
-        "velocity_range": {
-          "x": (-0.25, 0.25),
-          "y": (-0.25, 0.25),
-          "z": (-0.15, 0.15),
-          "roll": (-0.52, 0.52),
-          "pitch": (-0.52, 0.52),
-          "yaw": (-0.78, 0.78),
-        },
+        "rotational_probability": 0.5,
+        "linear_speed_range": (0.0, PUSH_LINEAR_START),
+        "angular_speed_range": (0.0, PUSH_ANGULAR_START),
       },
     ),
   } | domain_rands
@@ -847,7 +866,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "dir_sigma": KICK_DIR_SIGMA_START,
         # Speed tolerance relative to the commanded strength, so 5 m/s is not
         # held to the same absolute precision as 1 m/s.
-        "speed_rel_std": 0.35,
+        "speed_rel_std": 0.50,
         "min_ball_speed": 0.2,
         # A toe-poke still pays a quarter of a clean side-foot contact: it has
         # to be discoverable before it can be refined away.
@@ -857,7 +876,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     ),
     "kick_direction": MultiRewardTermCfg(
       func=pi_mdp.kick_direction,
-      weight=2.0,
+      weight=4.0,
       params={
         "command_name": "command",
         "sub_command_name": "kick",
@@ -922,7 +941,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "posture": MultiRewardTermCfg(
       func=pi_mdp.variable_posture,
       weight=1.0,
-      command_weights=STAND_BOOSTED,
+      command_weights=ALL,
       params={
         "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
         "command_name": "command",
@@ -930,27 +949,27 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
           r".*": 0.1,
         },
         "std_walking": {
-          r".*_hip_pitch_joint": 0.35,
-          r".*_hip_roll_joint": 0.15,
-          r".*_thigh_joint": 0.15,
-          r".*_calf_joint": 0.35,
-          r".*_ankle_pitch_joint": 0.35,
-          r".*_ankle_roll_joint": 0.1,
-          r".*_shoulder_pitch_joint": 0.25,
-          r".*_shoulder_roll_joint": 0.1,
-          r".*_upper_arm_joint": 0.05,
-          r".*_elbow_joint": 0.2,
-        },
-        "std_running": {
-          r".*_hip_pitch_joint": 0.5,
+          r".*_hip_pitch_joint": 1.5,
           r".*_hip_roll_joint": 0.25,
           r".*_thigh_joint": 0.25,
-          r".*_calf_joint": 0.5,
-          r".*_ankle_pitch_joint": 0.5,
+          r".*_calf_joint": 1.5,
+          r".*_ankle_pitch_joint": 1.5,
           r".*_ankle_roll_joint": 0.1,
           r".*_shoulder_pitch_joint": 0.35,
-          r".*_shoulder_roll_joint": 0.15,
-          r".*_upper_arm_joint": 0.05,
+          r".*_shoulder_roll_joint": 0.2,
+          r".*_upper_arm_joint": 0.1,
+          r".*_elbow_joint": 0.25,
+        },
+        "std_running": {
+          r".*_hip_pitch_joint": 1.5,
+          r".*_hip_roll_joint": 0.25,
+          r".*_thigh_joint": 0.25,
+          r".*_calf_joint": 1.5,
+          r".*_ankle_pitch_joint": 1.5,
+          r".*_ankle_roll_joint": 0.1,
+          r".*_shoulder_pitch_joint": 0.35,
+          r".*_shoulder_roll_joint": 0.2,
+          r".*_upper_arm_joint": 0.1,
           r".*_elbow_joint": 0.25,
         },
         # NOTE: under a path command the commanded twist reads zero, so this
@@ -986,7 +1005,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       params={
         "frequency": WALK_FREQUENCY,
         "offset": [0.0, 0.5],
-        "foot_height": 0.03,
+        "foot_height": 0.03, # TODO tune this here after run with posture
         "stance_threshold": 0.56,
         "std": 0.025,
         "command_name": "command",
@@ -1073,6 +1092,24 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # Curriculum
   ##
   curriculum = {
+    # Harder pushes as training goes on. Linear rather than staged: a step
+    # change in push strength is a cliff the gait has to re-learn through.
+    "ramp_push": CurriculumTermCfg(
+      func=pi_mdp.event_param_linear,
+      params={
+        "event_name": "push_robot",
+        "start_step": PUSH_RAMP_START_STEP,
+        "end_step": PUSH_RAMP_END_STEP,
+        "start_params": {
+          "linear_speed_range": (0.0, PUSH_LINEAR_START),
+          "angular_speed_range": (0.0, PUSH_ANGULAR_START),
+        },
+        "end_params": {
+          "linear_speed_range": (0.0, PUSH_LINEAR_END),
+          "angular_speed_range": (0.0, PUSH_ANGULAR_END),
+        },
+      },
+    ),
     # Kick bootstrap off: the flat payout per contact exists only to get the
     # policy to touch the ball at all. Once it does, the quality terms should
     # drive the rest, or weak taps stay competitive with real kicks.

@@ -212,6 +212,31 @@ the type the mask reads.
 > shows — the arms sit within 0.02 rad of default while walking and 2.03 rad
 > from it while standing.
 
+### The push (`mdp/push.py`)
+
+`push_by_velocity_delta` replaces mjlab's `push_by_setting_velocity` in the
+multi task (the velocity and path tasks still use mjlab's). Same
+instantaneous, mass-independent root-velocity delta; different sample. mjlab's
+draws all six twist components from their own boxes, so every push is a mixture
+— a diagonal shove with roll, pitch and yaw stirred in — and its magnitude
+concentrates near the box RMS instead of covering the range. This one picks
+**one kind per push**: translational (a horizontal direction, uniform on the
+circle, times a speed) or rotational (that same direction as a *spin axis*,
+times an angular speed about it), at `rotational_probability` 0.5.
+
+> ⚠️ **There is no yaw push and no vertical shove any more.** The spin axis is
+> horizontal by construction — that is what tips the robot; a spin about z only
+> turns it on the spot. If yaw disturbance is wanted back it needs its own kind,
+> not a third component.
+
+Magnitudes are sampled from 0 to a ceiling that `ramp_push`
+(`event_param_linear`) grows linearly, so raising it adds harder pushes without
+removing the gentle ones. `PUSH_LINEAR_START` 0.25 m/s and `PUSH_ANGULAR_START`
+0.52 rad/s are what the old box term topped out at per horizontal axis and in
+roll/pitch; both ramp to 1.0 between iterations 1000 and 5000. The ramp is
+linear rather than staged (`event_curriculum`, which the path task uses) because
+a step change in push strength is a cliff the gait has to re-learn through.
+
 ### Action scale
 
 The multi task uses mjlab's plain `JointPositionActionCfg` at a uniform
