@@ -33,6 +33,7 @@ from mjlab_piplus.tasks.mdp.footstep.footstep_command import OBS_PER_FOOTSTEP
 from mjlab_piplus.tasks.mdp.symmetry import (
   JOINT_ORDER_12,
   JOINT_ORDER_20,
+  WITH_ARMS,
   PiPlusGoalPoseSymmetry,
   PiPlusMultiSymmetry,
   PiPlusPathSymmetry,
@@ -118,8 +119,12 @@ def check_obs_widths() -> tuple[tuple[str, PiPlusSymmetry, int, int], ...]:
   path_n = path_command.num_observations
   path_dim = prefix(12) + 2 * path_n + 2
 
+  # The multi task follows ``WITH_ARMS``: 20 joints with the arms actuated, 12
+  # without. Hard-coding 20 here would make this check pass against a layout the
+  # env does not have.
+  multi_joints = 20 if WITH_ARMS else 12
   multi_dim = (
-    prefix(20)
+    prefix(multi_joints)
     + 6  # one_hot over the six command types
     + 3  # velocity, no stand flag
     + 2 * NUM_PATH_OBSERVATIONS
@@ -141,7 +146,7 @@ def check_obs_widths() -> tuple[tuple[str, PiPlusSymmetry, int, int], ...]:
         num_footstep_observations=NUM_FOOTSTEP_OBSERVATIONS,
       ),
       multi_dim,
-      20,
+      multi_joints,
     ),
   )
   for label, sym, obs_dim, _act_dim in cases:

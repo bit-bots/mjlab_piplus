@@ -435,6 +435,121 @@ So the shaping alone offers 2.87/step for standing up, against up to 2.0/step
 for imitating well. A policy that stands *without* imitating out-scores one that
 imitates on the floor — intended, but worth knowing before reading a run.
 
+### Evaluation (`tasks/eval/`, `Mjlab-MultiEval-PiPlus`)
+
+A deterministic benchmark for the multi-command policy: **one command type per
+episode, no switching**, with every command replayed from a pre-generated file
+so two policies meet the same scenarios rather than the same distribution.
+
+```sh
+# Once: 1000 commands per type, from the training env cfg's own ranges.
+uv run python -m mjlab_piplus.tasks.eval.generate_commands   # -> eval_commands.json
+
+# All six types in turn, 100 episodes each.
+CUDA_VISIBLE_DEVICES=2 uv run python -m mjlab_piplus.tasks.eval.run_eval \
+  --wandb-run-path jgueldenstein/mjlab_piplus/<id>
+# A subset, and the do-nothing floor to read the numbers against:
+  ... --types velocity kick --runs-per-command 200 --num-envs 128
+  ... --agent zero
+```
+
+Results land in `logs/eval/<run>_<timestamp>/`: `episodes_<type>.csv` (one row
+per episode, every measured quantity) and `summary.json` (mean/median/p90/n per
+field, plus the run config). `uv run play Mjlab-MultiEval-PiPlus
+--wandb-run-path ...` shows the same scenarios in the viewer.
+
+| file | what it holds |
+|---|---|
+| `command_book.py` | the schema of a command per type, the generator, JSON load/save |
+| `generate_commands.py` | the CLI that writes `eval_commands.json` |
+| `eval_commands.py` | `Eval*` subclasses of every command term: replay + measurement |
+| `eval_env_cfg.py` | `piplus_multi_eval_env_cfg()` — the multi env, made repeatable |
+| `run_eval.py` | the headless runner, CSV/JSON output, summary table |
+
+**What is measured.** Velocity: mean absolute tracking error in `vx`, `vy` and
+`wz` after a 1 s warmup (the acceleration out of a standstill is a step
+response, not tracking). Goal pose: time to the goal, split into
+position-only and full pose, plus final/min distance and yaw error. Path: mean
+and max distance to the reference path, and time to goal. Footstep: xy, z and
+yaw error of each landing against the target that was **latched** for it at
+touchdown, averaged over the episode. Kick: the first completed kick's peak
+speed against the commanded strength, the aim error of the ball's actual travel
+direction, style and whether the intended foot struck. Stand: base drift, yaw
+drift, posture RMS. Every type also reports `fell`, `steps` and `duration`.
+
+**Plotting.** `plot_eval.py` turns those CSVs into figures — **one file per
+plot**, named `<command type>_<plot>.pdf`:
+
+```sh
+uv run python -m mjlab_piplus.tasks.eval.plot_eval --runs logs/eval/<run>
+uv run python -m mjlab_piplus.tasks.eval.plot_eval \
+  --runs logs/eval/<a> logs/eval/<b> --labels baseline candidate
+  ... --bare              # no title or provenance line: the document captions it
+  ... --combined          # also write the multi-panel sheet per type
+  ... --format png|both   # default pdf (vector); dpi only affects the raster
+  ... --theme dark        # its own steps for the dark surface, not an inversion
+```
+
+So `goal_pose` yields exactly `goal_pose_time_vs_distance.pdf`,
+`goal_pose_final_distance.pdf` and `goal_pose_outcomes.pdf`. Files land in
+`<first run>/plots` unless `--out` says otherwise. The contact sheet is off by
+default — the individual files are the deliverable, the sheet is for reviewing
+them at a glance. The form follows each type's question: commanded-vs-achieved scatter against the `y = x`
+line for velocity and kick speed, time-to-goal against how far the goal *was*
+for path and goal pose (a slow episode over 8 m is not the slow episode over
+1 m), and ECDFs for every error distribution — several runs overlay without
+occluding each other, and the median and the tail are both readable, which a
+histogram gives up. Rates are horizontal bars, direct-labelled.
+
+> ⚠️ **At most three runs per plot.** The scatter panels put every pair of
+> series on screen at once, and only the first three slots of the palette clear
+> the colour-separation floors that way; a fourth would seat a pair nobody with
+> a colour-vision deficiency can tell apart. The script refuses rather than
+> cycling hues — plot in groups instead. Colours are the `dataviz` reference
+> palette's categorical slots 1–3 plus its chart chrome.
+
+> ⚠️ **A NaN is a result, not a zero.** "No footstep landed", "the goal was
+> never reached", "the ball was never touched" are reported as NaN and dropped
+> from the aggregate, with `n` saying how many episodes actually made the
+> measurement. Averaging them in as zeros would score a policy that never
+> attempts the task as perfect at it.
+
+**How determinism is achieved.** Env `e` runs command indices
+`e, e+N, e+2N, ...` for `N` envs, assigned at reset from an episode counter —
+so which episode gets which command does not depend on the policy, on when a
+robot falls, or on the order envs finish in. Two policies evaluated at the same
+`--num-envs` see identical scenarios in identical order; at a different
+`--num-envs` they see the same *set* (rows `0..runs-1`), distributed
+differently. Each `Eval*` term overrides only its sampling: every drawn
+quantity is replaced by its book row, and the sub-command configs are copied
+field by field off the training cfg (`_as_eval_cfg`), so a range changed in
+training is automatically part of the evaluation and the observation layout
+cannot drift. The spawn yaw is pinned to 0 and the joint reset jitter to zero;
+the booked goals, paths and kick directions are all **relative to the robot's
+heading**, so nothing depends on where the robot happens to face.
+
+> ⚠️ **DR, pushes and observation noise are OFF by default** (`--domain-rand`,
+> `--push`, `--obs-noise` turn them on). The default numbers are a clean
+> measurement of the controller, **not** a robustness measurement — say which
+> flags were on when quoting them. The fixed one-step sensor delay stays on in
+> both cases: it is part of the plant, not of the noise.
+
+> ⚠️ **The book is a checked-in artifact, not a temp file.** Regenerating it
+> (`--force`) silently invalidates every result measured against the old one.
+> `path_index` names a path in the A* library, so the book records the library
+> size it was drawn against (`EVAL_PATHLIB_SIZE`, 2000 — the multi task's own
+> path library, also pinned onto the footstep command, whose training default
+> of 50 000 is a 1.9 GB file) and the eval terms refuse a mismatch: the i-th
+> path of one library is not the i-th path of another.
+
+Per-type episode lengths (`EVAL_EPISODE_LENGTH_S`) are enforced by
+`eval_time_out` reading the *active* type's limit — a path up to 8 m long and a
+velocity command need very different clocks, and `mdp.time_out`'s single
+env-wide maximum would put every type on the longest one. The sub-commands'
+resampling intervals are pushed past the episode length, so a command is drawn
+at the reset and held. One env instance serves every type: `set_forced_type`
+re-pins it between passes, which is far cheaper than rebuilding the sim.
+
 ### Viewer GUI (`mdp/push_gui.py`)
 
 mjlab's viser viewer only hands *command terms* a GUI hook

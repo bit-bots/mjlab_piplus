@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 
 import mujoco
+import numpy as np
 from mjlab.actuator import XmlActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.spec_config import CollisionCfg
@@ -24,13 +25,88 @@ ARM_JOINT_EXPR = r"^[lr]_(shoulder_pitch|shoulder_roll|upper_arm|elbow)_joint$"
 for them (see :func:`get_spec`)."""
 
 
+def _resolve_home_angle(joint_name: str, home: dict[str, float]) -> float:
+  """The one entry of ``home`` whose pattern matches ``joint_name``."""
+  matches = [
+    value for pattern, value in home.items() if re.fullmatch(pattern, joint_name)
+  ]
+  if len(matches) != 1:
+    raise ValueError(
+      f"'{joint_name}' matches {len(matches)} entries of the home pose "
+      f"({sorted(home)}); it must match exactly one."
+    )
+  return matches[0]
+
+
+def _weld_arms_at_home(spec: mujoco.MjSpec) -> None:
+  """Fold each arm joint's home angle into its body frame, in place.
+
+  Deleting a hinge pins its body at joint angle *zero*, which for the arms is
+  not the pose the robot cfg calls default: ``ARM_HOME_JOINT_POS`` puts the
+  shoulders at +-90 deg, the shoulder rolls at +-1.2 and the elbows at +-0.7
+  rad. Baking the angle into the parent-relative body frame before the joint
+  goes away welds the arms exactly where ``get_home_keyframe(with_arms=True)``
+  would have held them, so the 12-DoF robot is the 20-DoF robot standing in its
+  home pose with the arms frozen there.
+
+  The frames are read off a compiled copy rather than off ``body.quat``: the
+  MJCF writes its orientations as ``euler=``, which lives in ``body.alt`` and is
+  only resolved into a quaternion by the compiler. Writing ``body.quat`` while
+  that euler is still set would be silently ignored.
+  """
+  model = spec.compile()
+  for body in spec.bodies:
+    arm_joints = [j for j in body.joints if re.match(ARM_JOINT_EXPR, j.name)]
+    if not arm_joints:
+      continue
+    if len(arm_joints) > 1:
+      raise ValueError(
+        f"Body '{body.name}' carries {len(arm_joints)} arm joints "
+        f"({[j.name for j in arm_joints]}); the weld below composes one."
+      )
+    joint = arm_joints[0]
+    if joint.type != mujoco.mjtJoint.mjJNT_HINGE:
+      raise ValueError(f"Arm joint '{joint.name}' is not a hinge.")
+
+    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body.name)
+    base_pos = model.body_pos[body_id].copy()
+    base_quat = model.body_quat[body_id].copy()
+
+    axis = np.asarray(joint.axis, dtype=float)
+    axis /= np.linalg.norm(axis)
+    rot = np.zeros(4)
+    mujoco.mju_axisAngle2Quat(
+      rot, axis, _resolve_home_angle(joint.name, ARM_HOME_JOINT_POS)
+    )
+
+    # The hinge maps a body-local point x to ``anchor + R (x - anchor)``, so the
+    # welded frame is ``T_body o T_hinge``: quaternions multiply, and the anchor
+    # offset is carried into the parent frame. ``anchor`` is zero for every arm
+    # joint in the current MJCF, which makes the translation vanish -- computed
+    # anyway so a moved anchor does not silently shift the arm.
+    anchor = np.asarray(joint.pos, dtype=float)
+    rotated_anchor = np.zeros(3)
+    mujoco.mju_rotVecQuat(rotated_anchor, anchor, rot)
+    offset = np.zeros(3)
+    mujoco.mju_rotVecQuat(offset, anchor - rotated_anchor, base_quat)
+
+    new_quat = np.zeros(4)
+    mujoco.mju_mulQuat(new_quat, base_quat, rot)
+
+    body.pos = base_pos + offset
+    body.quat = new_quat
+    # The euler in ``alt`` outranks ``quat``; drop it or the write above is lost.
+    body.alt.type = mujoco.mjtOrientation.mjORIENTATION_QUAT
+
+
 def get_spec(with_arms: bool = False) -> mujoco.MjSpec:
   """Build the PiPlus spec.
 
   Args:
     with_arms: Keep the arm joints and their position actuators. When False they
-      are deleted from the spec, leaving the arms welded to the torso -- the
-      12-DoF layout the velocity and path tasks (and ``JOINT_ORDER_12`` in
+      are deleted from the spec, leaving the arms welded to the torso in the
+      ``ARM_HOME_JOINT_POS`` pose (see :func:`_weld_arms_at_home`) -- the 12-DoF
+      layout the velocity and path tasks (and ``JOINT_ORDER_12`` in
       ``mdp/symmetry.py``) are built around.
   """
   spec = mujoco.MjSpec.from_file(str(PIPLUS_XML))
@@ -39,6 +115,9 @@ def get_spec(with_arms: bool = False) -> mujoco.MjSpec:
       geom.rgba = VISUAL_RGBA
 
   if not with_arms:
+    # Before the joints go: a deleted hinge leaves its body at angle zero, not
+    # at the default pose.
+    _weld_arms_at_home(spec)
     # Actuators first: an actuator whose target joint is gone fails to compile.
     for actuator in list(spec.actuators):
       if re.match(ARM_JOINT_EXPR, actuator.target):
@@ -50,8 +129,8 @@ def get_spec(with_arms: bool = False) -> mujoco.MjSpec:
   return spec
 
 
-ACTUATOR_LAG_MIN = 1
-ACTUATOR_LAG_MAX = 1
+ACTUATOR_LAG_MIN = 0
+ACTUATOR_LAG_MAX = 3
 
 # ACTUATOR_3536 = XmlActuatorCfg(
 #   target_names_expr=(
@@ -109,7 +188,6 @@ ARM_HOME_JOINT_POS: dict[str, float] = {
   ".*_upper_arm_joint": 0.0,
   "r_elbow_joint": -0.7,
   "l_elbow_joint": 0.7,
-
 }
 
 

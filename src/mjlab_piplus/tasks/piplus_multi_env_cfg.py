@@ -82,9 +82,10 @@ from mjlab_piplus.tasks.mdp.path_following import (
   goal_reached_linear,
   path_progress_reward,
 )
+from mjlab_piplus.tasks.mdp.symmetry import WITH_ARMS
 
-DELAY_MIN = 1
-DELAY_MAX = 1
+DELAY_MIN = 0
+DELAY_MAX = 3
 
 # Sensing delay of the ball observation, in control steps (200-300 ms at 50 Hz).
 # The ball is seen by a camera rather than read off an encoder, so it lags far
@@ -150,6 +151,31 @@ KICK_ONLY = {**_OFF, "kick": 1.0}
 # term pulls against the gait and stays at its nominal weight.
 STAND_BOOSTED = {name: 1.0 for name in _OFF} | {"stand": 3.0}
 ALL = {name: 1.0 for name in _OFF}
+
+# Per-joint tolerance for ``posture`` while walking or running. The sagittal
+# leg joints carry the gait's large excursions and are scored loosely; the
+# lateral ones and the arms do small precise work and are held tight.
+#
+# The arm half only exists when the arms are actuated: ``variable_posture``
+# resolves these patterns against the joints the robot actually has, and an
+# unmatched pattern is a hard error, so a 12-DoF robot must not be handed the
+# arm entries. ``WITH_ARMS`` is defined in ``mdp/symmetry.py`` -- see there for
+# why that is its home.
+_POSTURE_STD_LEGS = {
+  r".*_hip_pitch_joint": 1.5,
+  r".*_hip_roll_joint": 0.25,
+  r".*_thigh_joint": 0.25,
+  r".*_calf_joint": 1.5,
+  r".*_ankle_pitch_joint": 1.5,
+  r".*_ankle_roll_joint": 0.1,
+}
+_POSTURE_STD_ARMS = {
+  r".*_shoulder_pitch_joint": 0.35,
+  r".*_shoulder_roll_joint": 0.2,
+  r".*_upper_arm_joint": 0.1,
+  r".*_elbow_joint": 0.25,
+}
+POSTURE_STD_MOVING = _POSTURE_STD_LEGS | (_POSTURE_STD_ARMS if WITH_ARMS else {})
 
 # Number of future path points in the command observation.
 NUM_PATH_OBSERVATIONS = 8
@@ -297,6 +323,42 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   ##
   # Commands
   ##
+  PATH_RESAMPLING_TIME = (10.0, 20.0)  # seconds
+  FOOTSTEP_RESAMPLING_TIME = (10.0, 20.0)  # seconds
+  GOAL_POSE_RESAMPLING_TIME = (1.0, 15.0)  # seconds
+  VELOCITY_RESAMPLING_TIME = (3.0, 8.0)  # seconds
+  KICK_RESAMPLING_TIME = (5.0, 15.0)  # seconds
+  STAND_RESAMPLING_TIME = (2.0, 4.0)  # seconds
+
+  PATH_RESAMPLING_AVERAGE = sum(PATH_RESAMPLING_TIME) / 2.0
+  FOOTSTEP_RESAMPLING_AVERAGE = sum(FOOTSTEP_RESAMPLING_TIME) / 2.0
+  GOAL_POSE_RESAMPLING_AVERAGE = sum(GOAL_POSE_RESAMPLING_TIME) / 2.0
+  VELOCITY_RESAMPLING_AVERAGE = sum(VELOCITY_RESAMPLING_TIME) / 2.0
+  KICK_RESAMPLING_AVERAGE = sum(KICK_RESAMPLING_TIME) / 2.0
+  STAND_RESAMPLING_AVERAGE = sum(STAND_RESAMPLING_TIME) / 2.0
+
+  DESIRED_FRACTION_PATH = 0.15
+  DESIRED_FRACTION_FOOTSTEP = 0.15
+  DESIRED_FRACTION_GOAL_POSE = 0.15
+  DESIRED_FRACTION_VELOCITY = 0.225
+  DESIRED_FRACTION_KICK = 0.225
+  DESIRED_FRACTION_STAND = 0.1
+  
+  W_PATH_RESAMPLING = DESIRED_FRACTION_PATH / PATH_RESAMPLING_AVERAGE
+  W_FOOTSTEP_RESAMPLING = DESIRED_FRACTION_FOOTSTEP / FOOTSTEP_RESAMPLING_AVERAGE
+  W_GOAL_POSE_RESAMPLING = DESIRED_FRACTION_GOAL_POSE / GOAL_POSE_RESAMPLING_AVERAGE
+  W_VELOCITY_RESAMPLING = DESIRED_FRACTION_VELOCITY / VELOCITY_RESAMPLING_AVERAGE
+  W_KICK_RESAMPLING = DESIRED_FRACTION_KICK / KICK_RESAMPLING_AVERAGE
+  W_STAND_RESAMPLING = DESIRED_FRACTION_STAND / STAND_RESAMPLING_AVERAGE
+
+  SUM_W = W_PATH_RESAMPLING + W_FOOTSTEP_RESAMPLING + W_GOAL_POSE_RESAMPLING + W_VELOCITY_RESAMPLING + W_KICK_RESAMPLING + W_STAND_RESAMPLING
+
+  FRACTION_PATH = W_PATH_RESAMPLING / SUM_W
+  FRACTION_FOOTSTEP = W_FOOTSTEP_RESAMPLING / SUM_W
+  FRACTION_GOAL_POSE = W_GOAL_POSE_RESAMPLING / SUM_W
+  FRACTION_VELOCITY = W_VELOCITY_RESAMPLING / SUM_W
+  FRACTION_KICK = W_KICK_RESAMPLING / SUM_W
+  FRACTION_STAND = W_STAND_RESAMPLING / SUM_W
 
   # The multi command redraws the type on each resample, then arms the next
   # resample from the *selected* sub-command's own ``resampling_time_range``:
@@ -305,7 +367,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   path_cfg = PathCommandCfg(
     entity_name="robot",
     debug_vis=True,
-    resampling_time_range=(10.0, 20.0),
+    resampling_time_range=PATH_RESAMPLING_TIME,
     num_observations=NUM_PATH_OBSERVATIONS,
     # A path can be handed to a robot that is already mid-episode and away from
     # its spawn, so anchor each new path at the robot's current position.
@@ -321,7 +383,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   footstep_cfg = FootstepCommandCfg(
     entity_name="robot",
     debug_vis=True,
-    resampling_time_range=(10.0, 20.0),
+    resampling_time_range=FOOTSTEP_RESAMPLING_TIME,
     # Must match the gait the phase observation and the feet_* rewards run on:
     # the footstep schedule is read straight off that clock.
     frequency=WALK_FREQUENCY,
@@ -334,20 +396,21 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   commands: dict[str, CommandTermCfg] = {
     "command": pi_mdp.MultiCommandCfg(
+      independent_command_sampling=True,
       debug_vis=True,
       change_command_probability=0.3,
       fractions={
-        "velocity": 0.25,
-        "path": 0.15,
-        "goal_pose": 0.15,
-        "footstep": 0.15,
-        "kick": 0.2,
-        "stand": 0.10,
+        "velocity": FRACTION_VELOCITY,
+        "path": FRACTION_PATH,
+        "goal_pose": FRACTION_GOAL_POSE,
+        "footstep": FRACTION_FOOTSTEP,
+        "kick": FRACTION_KICK,
+        "stand": FRACTION_STAND,
       },
       terms={
         "velocity": pi_mdp.UniformVelocityCommandWithStopCfg(
           entity_name="robot",
-          resampling_time_range=(3.0, 8.0),
+          resampling_time_range=VELOCITY_RESAMPLING_TIME,
           debug_vis=True,
           heading_command=True,
           heading_control_stiffness=0.0,
@@ -359,7 +422,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
           rel_heading_envs=0.3,
           rel_forward_envs=0.15,
           ranges=pi_mdp.UniformVelocityCommandWithStopCfg.Ranges(
-            lin_vel_x=(-0.5, MAX_COMMANDED_SPEED),
+            lin_vel_x=(-MAX_COMMANDED_SPEED, MAX_COMMANDED_SPEED),
             lin_vel_y=(-0.4, 0.4),
             ang_vel_z=(-math.pi, math.pi),
             heading=(-math.pi, math.pi),
@@ -372,7 +435,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "goal_pose": pi_mdp.GoalPoseCommandCfg(
           entity_name="robot",
           debug_vis=True,
-          resampling_time_range=(1.0, 15.0),
+          resampling_time_range=GOAL_POSE_RESAMPLING_TIME,
           radius_range=(0.5, 8.0),
           yaw_range=(-math.pi, math.pi),
           rel_standing_envs=0.0,
@@ -384,7 +447,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
           debug_vis=True,
           # Long enough for several ball lives: the ball comes back after every
           # kick, so this only bounds how long the kick task is handed out for.
-          resampling_time_range=(8.0, 16.0),
+          resampling_time_range=KICK_RESAMPLING_TIME,
           # Placed within a 60 degree fan either side of where the robot is
           # facing, at most 1.2 m away whatever the bearing.
           distance_range=(0.15, 1.2),
@@ -400,7 +463,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
           contact_speed=0.5,
           window_s=1.0,
         ),
-        "stand": pi_mdp.StandCommandCfg(resampling_time_range=(2.0, 5.0)),
+        "stand": pi_mdp.StandCommandCfg(resampling_time_range=STAND_RESAMPLING_TIME),
       },
     )
   }
@@ -948,30 +1011,8 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "std_standing": {
           r".*": 0.1,
         },
-        "std_walking": {
-          r".*_hip_pitch_joint": 1.5,
-          r".*_hip_roll_joint": 0.25,
-          r".*_thigh_joint": 0.25,
-          r".*_calf_joint": 1.5,
-          r".*_ankle_pitch_joint": 1.5,
-          r".*_ankle_roll_joint": 0.1,
-          r".*_shoulder_pitch_joint": 0.35,
-          r".*_shoulder_roll_joint": 0.2,
-          r".*_upper_arm_joint": 0.1,
-          r".*_elbow_joint": 0.25,
-        },
-        "std_running": {
-          r".*_hip_pitch_joint": 1.5,
-          r".*_hip_roll_joint": 0.25,
-          r".*_thigh_joint": 0.25,
-          r".*_calf_joint": 1.5,
-          r".*_ankle_pitch_joint": 1.5,
-          r".*_ankle_roll_joint": 0.1,
-          r".*_shoulder_pitch_joint": 0.35,
-          r".*_shoulder_roll_joint": 0.2,
-          r".*_upper_arm_joint": 0.1,
-          r".*_elbow_joint": 0.25,
-        },
+        "std_walking": dict(POSTURE_STD_MOVING),
+        "std_running": dict(POSTURE_STD_MOVING),
         # NOTE: under a path command the commanded twist reads zero, so this
         # term sees the walking regime; only a velocity command can select
         # ``std_running``.
@@ -1005,7 +1046,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       params={
         "frequency": WALK_FREQUENCY,
         "offset": [0.0, 0.5],
-        "foot_height": 0.03, # TODO tune this here after run with posture
+        "foot_height": 0.045,
         "stance_threshold": 0.56,
         "std": 0.025,
         "command_name": "command",
@@ -1195,7 +1236,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       # itself up, and they are worth having for balance while walking anyway.
       # self_pads activates the *_selfpad geoms that the self_collision sensor
       # scores -- see SELF_PAD_COLLISION.
-      "robot": get_piplus_robot_cfg(with_arms=True, self_pads=True),
+      "robot": get_piplus_robot_cfg(with_arms=WITH_ARMS, self_pads=True),
       "ball": get_ball_cfg(),
     },
     sensors=(

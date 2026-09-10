@@ -914,6 +914,7 @@ name = "mjlab-piplus"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "matplotlib" },
     { name = "mjlab" },
     { name = "onnxruntime" },
     { name = "wandb" },
@@ -921,6 +922,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "matplotlib" },
     { name = "mjlab", git = "https://github.com/mujocolab/mjlab.git?rev=011a5ab441590a81664a813ff0160e99f5835aa6" },
     { name = "onnxruntime" },
     { name = "wandb", specifier = ">=0.28.1" },

@@ -1,6 +1,7 @@
 from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl.runner import VelocityOnPolicyRunner
 
+from .eval.eval_env_cfg import piplus_multi_eval_env_cfg
 from .piplus_multi_env_cfg import piplus_multi_env_cfg
 from .piplus_multi_rl_cfg import get_piplus_multi_rl_cfg
 from .piplus_path_env_cfg import piplus_path_env_cfg
@@ -30,6 +31,19 @@ register_mjlab_task(
   task_id="Mjlab-Multi-PiPlus",
   env_cfg=piplus_multi_env_cfg(),
   play_env_cfg=piplus_multi_env_cfg(play=True),
+  rl_cfg=get_piplus_multi_rl_cfg(),
+  runner_cls=VelocityOnPolicyRunner,
+)
+# The deterministic evaluation env: the multi task with its commands replayed
+# from a pre-generated book instead of sampled, one command type per episode.
+# Not for training -- ``eval/run_eval.py`` drives it headless and writes the
+# per-episode measurements. Registered so ``uv run play Mjlab-MultiEval-PiPlus``
+# shows the same scenarios the numbers come from; the viewer walks the book's
+# round-robin type schedule, one command per episode.
+register_mjlab_task(
+  task_id="Mjlab-MultiEval-PiPlus",
+  env_cfg=piplus_multi_eval_env_cfg(),
+  play_env_cfg=piplus_multi_eval_env_cfg(num_envs=1),
   rl_cfg=get_piplus_multi_rl_cfg(),
   runner_cls=VelocityOnPolicyRunner,
 )

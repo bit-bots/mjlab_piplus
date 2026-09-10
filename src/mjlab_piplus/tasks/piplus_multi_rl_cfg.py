@@ -8,6 +8,7 @@ from mjlab.rl import (
 )
 
 from mjlab_piplus.tasks.mdp import PiPlusMultiSymmetry
+from mjlab_piplus.tasks.mdp.symmetry import WITH_ARMS
 from mjlab_piplus.tasks.piplus_multi_env_cfg import (
   NUM_FOOTSTEP_OBSERVATIONS,
   NUM_PATH_OBSERVATIONS,
@@ -27,6 +28,7 @@ class PiPlusMultiPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
       "data_augmentation_func": PiPlusMultiSymmetry(
         num_path_observations=NUM_PATH_OBSERVATIONS,
         num_footstep_observations=NUM_FOOTSTEP_OBSERVATIONS,
+        arms=WITH_ARMS,
       ),
       "use_data_augmentation": True,
       "use_mirror_loss": True,

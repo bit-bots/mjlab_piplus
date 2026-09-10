@@ -18,9 +18,23 @@ command therefore keeps its short 3-8 s cadence while a path is given the much
 longer window it needs to actually be walked.
 
 At an episode reset there is no command to "keep", so the type is drawn straight
-from ``fractions``. Mid-episode the type changes with probability
-``change_command_probability`` (drawing from ``fractions`` renormalized over the
-*other* types), and is otherwise kept.
+from ``fractions``. Mid-episode there are two modes:
+
+* **Markov (default).** The type changes with probability
+  ``change_command_probability`` (drawing from ``fractions`` renormalized over
+  the *other* types), and is otherwise kept. Repeats are therefore impossible
+  on a change, and the dwell length is geometric with a rate that does not
+  depend on the type.
+* **Independent** (``independent_command_sampling=True``). Every resample draws
+  the type i.i.d. from ``fractions``, exactly as an episode reset does, with no
+  reference to what was active before. ``change_command_probability`` is unused
+  in this mode: a type is repeated with its own probability rather than a flat
+  ``1 - change_command_probability``.
+
+Neither mode makes the realized time share equal ``fractions``: the next tick is
+armed from the *selected* sub-command's ``resampling_time_range``, so a type
+that dwells longer occupies more of the episode than its draw probability. The
+``active_*`` metrics report the realized share; ``fractions`` controls the draw.
 """
 
 from __future__ import annotations
@@ -336,7 +350,12 @@ class MultiCommand(CommandTerm):
     probs = self._fractions.unsqueeze(0).repeat(n, 1)
     drawn_fresh = torch.multinomial(probs, 1).squeeze(1)
 
-    if self.num_types > 1:
+    if self.cfg.independent_command_sampling:
+      # Every tick is the reset draw: i.i.d. from ``fractions``, no memory of
+      # the current type. ``fresh`` is then irrelevant -- both branches of the
+      # ``torch.where`` below are the same draw.
+      kept_or_switched = drawn_fresh
+    elif self.num_types > 1:
       # Draw a *different* type: zero out the current one and renormalize, so
       # ``change_command_probability`` is literally the probability of changing.
       other = probs.clone()
@@ -507,7 +526,21 @@ class MultiCommandCfg(CommandTermCfg):
   """Probability that a mid-episode resample switches to a *different* type.
   With probability ``1 - change_command_probability`` the type is kept (its
   content is resampled either way). At an episode reset the type is always
-  drawn fresh from ``fractions``."""
+  drawn fresh from ``fractions``. Unused when
+  ``independent_command_sampling`` is set."""
+
+  independent_command_sampling: bool = False
+  """Draw the type i.i.d. from ``fractions`` at every resample, instead of
+  keeping it with probability ``1 - change_command_probability``.
+
+  The difference is what a resample is allowed to do with the *current* type.
+  In the default mode a change can never land on the type that is already
+  active, and every type is held for the same expected number of ticks. Here
+  each tick is an independent draw, so a type repeats with its own probability
+  ``f`` -- which is what you want if the type sequence should be memoryless, or
+  if a rare type should also be rare *to switch into* rather than merely rare to
+  start with. It does not change the realized time share, which is set by the
+  sub-commands' resampling intervals either way."""
 
   velocity_command_name: str = "velocity"
   """Which sub-command :func:`velocity_command` reads the commanded twist from."""

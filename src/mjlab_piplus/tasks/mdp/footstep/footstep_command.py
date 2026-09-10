@@ -399,7 +399,22 @@ class FootstepCommand(CommandTerm):
     return mu.unsqueeze(1) + noise * std
 
   def _sample_path_poses(self, num: int) -> torch.Tensor:
-    """Stance frames read off an A* path at a fixed arc-length spacing.
+    """``_path_poses`` for ``num`` randomly drawn paths and step lengths."""
+    assert self._all_paths is not None
+    idx = torch.randint(0, self._all_paths.shape[0], (num,), device=self.device)
+    step_length = torch.empty(num, 1, device=self.device).uniform_(
+      *self.cfg.path_step_length_range
+    )
+    return self._path_poses(idx, step_length)
+
+  def _path_poses(
+    self, idx: torch.Tensor, step_length: torch.Tensor
+  ) -> torch.Tensor:
+    """Stance frames read off named A* paths at a fixed arc-length spacing.
+
+    ``idx`` is ``(num,)`` into the path library and ``step_length`` ``(num, 1)``
+    in meters. Split out from the sampler so an evaluation can ask for one
+    specific path at one specific cadence (see ``eval/eval_commands.py``).
 
     The path is rotated so its initial tangent points along the anchor's
     forward axis (a path is generated on a random bearing, and the robot must
@@ -411,11 +426,6 @@ class FootstepCommand(CommandTerm):
     """
     assert self._all_paths is not None
     cfg = self.cfg
-    idx = torch.randint(0, self._all_paths.shape[0], (num,), device=self.device)
-
-    step_length = torch.empty(num, 1, device=self.device).uniform_(
-      *cfg.path_step_length_range
-    )
     arc = (
       torch.arange(1, cfg.max_steps + 1, device=self.device, dtype=torch.float32)
       * step_length

@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 __all__ = [
   "ARM_JOINTS",
+  "WITH_ARMS",
   "JOINT_ORDER_12",
   "JOINT_ORDER_20",
   "LEG_JOINTS",
@@ -72,6 +73,18 @@ __all__ = [
 ##
 # Joint layout.
 ##
+
+# Does the multi task actuate the arms? This is THE switch: the env cfg reads it
+# for ``get_piplus_robot_cfg(with_arms=...)`` and for the arm entries of the
+# posture stds, and it is the default of ``PiPlusMultiSymmetry(arms=...)`` below.
+#
+# It has to be the *signature* default and not merely an argument the rl cfg
+# passes, because tyro rebuilds ``PiPlusMultiSymmetry`` from its constructor
+# signature when it parses the CLI -- whatever the rl cfg passed is discarded and
+# the signature default is used instead. A flag that only lived in the rl cfg
+# call would be silently reverted to ``True`` in every ``uv run train``, and the
+# mirror would then be 8 joints wider than the observation.
+WITH_ARMS: bool = False
 
 LEG_JOINTS = ("hip_pitch", "hip_roll", "thigh", "calf", "ankle_pitch", "ankle_roll")
 ARM_JOINTS = ("shoulder_pitch", "shoulder_roll", "upper_arm", "elbow")
@@ -417,7 +430,10 @@ class PiPlusPathSymmetry(PiPlusSymmetry):
 
 
 class PiPlusMultiSymmetry(PiPlusSymmetry):
-  """Multi-command task: 20-DoF prefix + the composite command.
+  """Multi-command task: 12- or 20-DoF prefix + the composite command.
+
+  ``arms`` picks the joint layout and defaults to :data:`WITH_ARMS`, which is
+  what the env cfg builds the robot with.
 
   The command tail is
   ``[one_hot(6) | velocity(3) | path(2N+2) | footstep(8M) | goal_pose(4) |
@@ -435,11 +451,13 @@ class PiPlusMultiSymmetry(PiPlusSymmetry):
     num_types: int = 6,
     num_path_observations: int = 8,
     num_footstep_observations: int = 4,
+    arms: bool = WITH_ARMS,
   ) -> None:
+    joint_order = JOINT_ORDER_20 if arms else JOINT_ORDER_12
     super().__init__(
       obs_mirror=Mirror(
         [
-          *prefix_blocks(JOINT_ORDER_20),
+          *prefix_blocks(joint_order),
           one_hot_block(num_types),
           velocity_command_block(stand_flag=False),
           path_command_block(num_path_observations),
@@ -449,5 +467,5 @@ class PiPlusMultiSymmetry(PiPlusSymmetry):
           ball_state_block(),
         ]
       ),
-      joint_order=JOINT_ORDER_20,
+      joint_order=joint_order,
     )
