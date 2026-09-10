@@ -84,7 +84,7 @@ __all__ = [
 # the signature default is used instead. A flag that only lived in the rl cfg
 # call would be silently reverted to ``True`` in every ``uv run train``, and the
 # mirror would then be 8 joints wider than the observation.
-WITH_ARMS: bool = False
+WITH_ARMS: bool = True
 
 LEG_JOINTS = ("hip_pitch", "hip_roll", "thigh", "calf", "ankle_pitch", "ankle_roll")
 ARM_JOINTS = ("shoulder_pitch", "shoulder_roll", "upper_arm", "elbow")
