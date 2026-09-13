@@ -20,7 +20,9 @@ The form follows the question each command type asks:
   distribution, which is what the summary's mean collapses.
 * **goal_pose** / **path** -- time to goal against how far away the goal was,
   because a slow episode over 8 m is not the same result as a slow one over 1 m.
-* **footstep** -- the distribution of per-episode placement error.
+* **footstep** -- the distribution of per-episode placement error, plus the
+  linear error against the angular one, which says whether the run that puts
+  the foot in the wrong place is the run that puts it at the wrong angle.
 * **kick** -- commanded strength against the speed the ball actually reached,
   and how far off the aim was.
 * **stand** -- how far the robot drifted and how far its pose moved.
@@ -343,38 +345,6 @@ def rate_panel(
   ax.grid(axis="y", visible=False)
 
 
-def _short(path: Path) -> str:
-  """A path short enough to sit in a subtitle without pushing everything else out."""
-  text = str(path)
-  if len(text) <= 48:
-    return text
-  return f"…/{path.parent.name}/{path.name}"
-
-
-def provenance(runs: list[Run], width_chars: int) -> str:
-  """Where these numbers came from, in one line that fits the figure.
-
-  Collapsed rather than listed per run: a single-panel figure is ~5 inches
-  wide, and three full paths run straight off the right edge.
-  """
-  counts = {
-    len(table["steps"])
-    for run in runs
-    for table in run.tables.values()
-    if "steps" in table
-  }
-  parents = {run.path.resolve().parent for run in runs}
-  size = f"{counts.pop()} episodes/type" if len(counts) == 1 else "varying episodes"
-  if len(parents) == 1:
-    source = _short(parents.pop())
-  else:
-    source = " · ".join(_short(run.path) for run in runs)
-  text = f"{size} · {source}"
-  if len(text) > width_chars:
-    text = text[: max(0, width_chars - 1)] + "…"
-  return text
-
-
 def finish(
   fig,
   theme: Theme,
@@ -385,7 +355,7 @@ def finish(
   dpi: int,
   bare: bool,
 ) -> list[Path]:
-  """Title, provenance subtitle, shared legend, save once per format.
+  """Title, shared legend, save once per format.
 
   The bands are sized in inches rather than in figure fractions, because the
   same code lays out a single-panel figure four inches tall and a six-panel
@@ -397,21 +367,11 @@ def finish(
   if not bare:
     subject = f"{title} — {runs[0].label}" if len(runs) == 1 else title
     fig.suptitle(
-      subject, color=theme.ink, fontsize=13, x=0.012, ha="left", y=1 - 0.22 / height
+      subject, color=theme.ink, fontsize=13, x=0.012, ha="left", y=1 - 0.20 / height
     )
-    # Provenance rides under the title rather than in a footer: at the bottom it
-    # shares a line with the legend, and a long path walks straight into it.
-    # ~20 characters to the inch at 8pt, less the left margin.
-    fig.text(
-      0.012,
-      1 - 0.46 / height,
-      provenance(runs, int((fig.get_figwidth() - 0.3) * 20)),
-      ha="left",
-      va="top",
-      fontsize=8,
-      color=theme.muted,
-    )
-    top = 0.62 / height
+    # 0.20 in above the title's centre, ~0.09 in of cap height below it, and a
+    # 0.11 in gap before the plot starts.
+    top = 0.40 / height
 
   # A legend for two or more series, never for one: with a single run the title
   # already names it and a one-entry legend is noise. Under ``--bare`` there is
@@ -693,7 +653,7 @@ def build_footstep(theme: Theme, runs: list[Run]) -> Figure:
   return Figure(
     "footstep",
     "Footstep placement",
-    (1, 3),
+    (2, 2),
     [
       Panel(
         "placement_error",
@@ -720,6 +680,25 @@ def build_footstep(theme: Theme, runs: list[Run]) -> Figure:
           title="Foot orientation error",
           xlabel="episode mean |yaw error| (deg)",
           scale=180.0 / math.pi,
+        ),
+      ),
+      # The two errors against each other, one point per episode: says whether
+      # a run that puts the foot in the wrong place is the same run that puts
+      # it at the wrong angle, which neither distribution alone can show.
+      Panel(
+        "linear_vs_angular_error",
+        "Linear vs angular error",
+        partial(
+          scatter_panel,
+          theme=theme,
+          runs=runs,
+          command_type="footstep",
+          x_column="step_err_xy",
+          y_column="step_err_yaw",
+          title="Linear vs angular error",
+          xlabel="episode mean |xy error| (m)",
+          ylabel="episode mean |yaw error| (deg)",
+          y_scale=180.0 / math.pi,
         ),
       ),
       # Not "error vs footsteps taken": the schedule is read off the gait clock,
@@ -924,8 +903,8 @@ class PlotConfig:
   """Also write the multi-panel contact sheet per command type. Off by default:
   the individual files are the deliverable, the sheet is for reviewing them."""
   bare: bool = False
-  """Drop the title, provenance line and panel heading, leaving the plot alone.
-  For a figure whose document supplies the caption. The legend stays."""
+  """Drop the title, leaving the plot alone. For a figure whose document
+  supplies the caption. The legend stays."""
   theme: str = "light"
   """``light`` or ``dark``. The dark palette is its own set of steps for the
   dark surface, not an inversion."""
