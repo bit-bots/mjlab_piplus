@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import csv
 import math
+import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -101,6 +102,46 @@ DARK = Theme(
 # and only the first three slots clear the colour-separation floors that way.
 MAX_RUNS = len(LIGHT.series)
 
+# Point sizes before scaling. Every piece of text in a figure is drawn at
+# ``pt(role)``, so one number moves all of them together and their relative
+# weights stay put -- a 1.5x title beside an unscaled 8pt annotation reads as a
+# mistake rather than as emphasis.
+BASE_FONT = {
+  "suptitle": 13.0,
+  "title": 10.5,
+  "label": 9.0,
+  "tick": 8.5,
+  "legend": 9.5,
+  "note": 7.5,
+  "annotation": 8.0,
+}
+# Where the run legend goes: under the plot (its own band), in the plot's top
+# left corner (costing no band but covering whatever is there), or nowhere.
+LEGEND_BELOW = "below"
+LEGEND_INSIDE = "inside"
+LEGEND_OFF = "off"
+LEGEND_PLACEMENTS = (LEGEND_BELOW, LEGEND_INSIDE, LEGEND_OFF)
+
+DEFAULT_FONT_SCALE = 1.5
+_font_scale = DEFAULT_FONT_SCALE
+
+
+def set_font_scale(scale: float) -> None:
+  """Set the multiplier applied to every point size (and to the title bands)."""
+  global _font_scale
+  if scale <= 0.0:
+    raise ValueError(f"font scale must be positive, got {scale}.")
+  _font_scale = scale
+
+
+def pt(role: str) -> float:
+  return BASE_FONT[role] * _font_scale
+
+
+def inches(base: float) -> float:
+  """A layout band in inches, scaled with the text it has to hold."""
+  return base * _font_scale
+
 
 @dataclass
 class Run:
@@ -147,9 +188,9 @@ def load_run(path: Path, label: str) -> Run:
 def style_axes(ax, theme: Theme, title: str, xlabel: str, ylabel: str) -> None:
   """Hairline grid, two spines, muted axis ink. Everything recessive but the data."""
   ax.set_facecolor(theme.surface)
-  ax.set_title(title, color=theme.ink, fontsize=10.5, pad=8, loc="left")
-  ax.set_xlabel(xlabel, color=theme.ink_secondary, fontsize=9)
-  ax.set_ylabel(ylabel, color=theme.ink_secondary, fontsize=9)
+  ax.set_title(title, color=theme.ink, fontsize=pt("title"), pad=8)
+  ax.set_xlabel(xlabel, color=theme.ink_secondary, fontsize=pt("label"))
+  ax.set_ylabel(ylabel, color=theme.ink_secondary, fontsize=pt("label"))
   ax.grid(True, color=theme.grid, linewidth=0.8, linestyle="-")
   ax.set_axisbelow(True)
   for side in ("top", "right"):
@@ -157,7 +198,7 @@ def style_axes(ax, theme: Theme, title: str, xlabel: str, ylabel: str) -> None:
   for side in ("left", "bottom"):
     ax.spines[side].set_color(theme.axis)
     ax.spines[side].set_linewidth(0.8)
-  ax.tick_params(colors=theme.muted, labelsize=8.5, length=3, width=0.8)
+  ax.tick_params(colors=theme.muted, labelsize=pt("tick"), length=3, width=0.8)
 
 
 def note_coverage(ax, theme: Theme, notes: list[str]) -> None:
@@ -175,7 +216,7 @@ def note_coverage(ax, theme: Theme, notes: list[str]) -> None:
     transform=ax.transAxes,
     ha="right",
     va="bottom",
-    fontsize=7.5,
+    fontsize=pt("note"),
     color=theme.muted,
     linespacing=1.4,
   )
@@ -277,7 +318,7 @@ def scatter_panel(
         xytext=(-4, 6),
         textcoords="offset points",
         ha="right",
-        fontsize=8,
+        fontsize=pt("annotation"),
         color=theme.muted,
       )
   style_axes(ax, theme, title, xlabel, ylabel)
@@ -332,7 +373,7 @@ def rate_panel(
         xytext=(4, 0),
         textcoords="offset points",
         va="center",
-        fontsize=8,
+        fontsize=pt("annotation"),
         color=theme.ink_secondary if finite else theme.muted,
       )
   ax.set_yticks(positions)
@@ -345,59 +386,122 @@ def rate_panel(
   ax.grid(axis="y", visible=False)
 
 
+def wrap_title(text: str, width_in: float, size: float) -> str:
+  """Break a title that is wider than its figure onto a second line.
+
+  Wrapped rather than shrunk: the point size is a deliberate setting, and a
+  title that quietly gets smaller the longer it is undoes it. Split at the
+  ``figure: panel`` boundary where there is one, since that is where the title
+  already divides in meaning.
+  """
+  # ~0.5 em per character for a mixed-case system sans; the exact renderer
+  # extent would need a canvas that does not exist until the first draw.
+  available = width_in - 0.3
+  if len(text) * size * 0.5 / 72 <= available:
+    return text
+  if ": " in text:
+    head, tail = text.split(": ", 1)
+    return f"{head}:\n{tail}"
+  return textwrap.fill(text, width=max(8, int(available * 144 / size)))
+
+
+def title_lines(subject: str | None) -> int:
+  return 0 if subject is None else subject.count("\n") + 1
+
+
+def title_band(subject: str | None) -> float:
+  """Inches of canvas a title block needs, added to the plot height.
+
+  Only ever used to size the figure, so the plot area stays the same whether
+  the title takes one line or two; ``tight_layout`` is what actually keeps the
+  plot clear of the title.
+  """
+  if subject is None:
+    return inches(0.10)
+  return inches(0.05) + title_lines(subject) * pt("suptitle") * 1.15 / 72
+
+
 def finish(
   fig,
   theme: Theme,
-  runs: list[Run],
-  title: str,
+  subject: str | None,
   stem: Path,
   formats: tuple[str, ...],
   dpi: int,
-  bare: bool,
+  legend: str,
 ) -> list[Path]:
   """Title, shared legend, save once per format.
 
   The bands are sized in inches rather than in figure fractions, because the
   same code lays out a single-panel figure four inches tall and a six-panel
   sheet twice that: a fraction that leaves room for the title on one crushes
-  the plot on the other.
+  the plot on the other. They scale with the font, so larger text gets more
+  room rather than colliding with the plot.
   """
   height = fig.get_figheight()
-  top = 0.10 / height
-  if not bare:
-    subject = f"{title} — {runs[0].label}" if len(runs) == 1 else title
+  if subject is not None:
+    # Anchored by its top, so a wrapped title grows downward into the band the
+    # caller already sized for it.
     fig.suptitle(
-      subject, color=theme.ink, fontsize=13, x=0.012, ha="left", y=1 - 0.20 / height
+      subject,
+      color=theme.ink,
+      fontsize=pt("suptitle"),
+      va="top",
+      y=1 - inches(0.05) / height,
     )
-    # 0.20 in above the title's centre, ~0.09 in of cap height below it, and a
-    # 0.11 in gap before the plot starts.
-    top = 0.40 / height
 
   # A legend for two or more series, never for one: with a single run the title
   # already names it and a one-entry legend is noise. Under ``--bare`` there is
   # no title to name it, so the legend stays whatever the run count.
-  bottom = 0.06 / height
+  bottom = inches(0.06) / height
   handles, labels = [], []
   for ax in fig.axes:
     for handle, label in zip(*ax.get_legend_handles_labels(), strict=True):
       if label not in labels:
         handles.append(handle)
         labels.append(label)
-  if len(handles) > 1 or (bare and handles):
-    legend = fig.legend(
-      handles,
-      labels,
-      loc="lower left",
-      bbox_to_anchor=(0.012, 0.02 / height),
-      ncol=len(labels),
-      frameon=False,
-      fontsize=9.5,
-    )
-    for text in legend.get_texts():
+  if legend != LEGEND_OFF and (len(handles) > 1 or (subject is None and handles)):
+    if legend == LEGEND_INSIDE:
+      # In the first panel only -- one legend per figure, not one per cell --
+      # and over a surface-coloured patch, so it stays readable where it lands
+      # on data. Stacked rather than in a row: a corner is taller than wide.
+      box = fig.axes[0].legend(
+        handles,
+        labels,
+        loc="upper left",
+        frameon=True,
+        facecolor=theme.surface,
+        edgecolor="none",
+        framealpha=0.85,
+        borderpad=0.5,
+        labelspacing=0.4,
+        fontsize=pt("legend"),
+      )
+      box.set_zorder(5)
+    else:
+      box = fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, inches(0.02) / height),
+        ncol=len(labels),
+        frameon=False,
+        fontsize=pt("legend"),
+      )
+      # The band the plot gives up for it; an inside legend costs nothing here.
+      bottom = inches(0.36) / height
+    for text in box.get_texts():
       text.set_color(theme.ink_secondary)
-    bottom = 0.36 / height
 
-  fig.tight_layout(rect=(0.0, bottom, 1.0, 1 - top))
+  # The rect reserves the legend band only. ``tight_layout`` measures the
+  # suptitle itself, so reserving a band for it here as well would double-count
+  # it and leave a gap of one title's height between the title and the plot --
+  # ``title_band`` is for sizing the canvas, not for carving the rect.
+  #
+  # ``pad`` is the figure-edge margin and must stay wide enough for a long
+  # rotated y-label; ``h_pad`` is the gap between stacked rows, where that same
+  # label would otherwise run into the panel above.
+  fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0), pad=1.0, w_pad=1.0, h_pad=1.4)
   stem.parent.mkdir(parents=True, exist_ok=True)
   written = []
   for suffix in formats:
@@ -435,11 +539,28 @@ class Output:
   dpi: int
   bare: bool
   combined: bool
+  legend: str
 
 
 # Roughly a half-page figure: wide enough for an axis label under a date-free
-# numeric axis, tall enough that an ECDF is not a flat smear.
-PANEL_SIZE = (5.6, 4.3)
+# numeric axis, tall enough that an ECDF is not a flat smear. Slightly wider
+# than tall, so a panel dropped into a two-column document does not eat the
+# page.
+PANEL_SIZE = (5.6, 3.7)
+
+
+def subject_for(
+  title: str, runs: list[Run], width_in: float, output: Output
+) -> str | None:
+  """The figure title, wrapped to the width it will be drawn at.
+
+  ``None`` under ``--bare``: there is no title, and the caller sizes the
+  figure without a title band.
+  """
+  if output.bare:
+    return None
+  text = f"{title} — {runs[0].label}" if len(runs) == 1 else title
+  return wrap_title(text, width_in, pt("suptitle"))
 
 
 def render(
@@ -447,29 +568,38 @@ def render(
 ) -> list[Path]:
   """One file per panel, plus the contact sheet when asked for."""
   written: list[Path] = []
+  width, plot_height = PANEL_SIZE
   for panel in spec.panels:
-    fig, ax = plt.subplots(figsize=PANEL_SIZE)
+    subject = subject_for(f"{spec.title}: {panel.title}", runs, width, output)
+    # The title band is added to the plot height rather than taken out of it,
+    # so a title that wraps onto a second line grows the canvas instead of
+    # squeezing the plot.
+    fig, ax = plt.subplots(figsize=(width, plot_height + title_band(subject)))
     fig.patch.set_facecolor(theme.surface)
     panel.draw(ax)
     # The figure title names this panel (or, under --bare, the document's
-    # caption does); the axes heading would just say it twice. ``loc="left"``
-    # because that is the slot ``style_axes`` wrote -- matplotlib keeps a
-    # separate title per location, so clearing the centre one clears nothing.
-    ax.set_title("", loc="left")
+    # caption does); the axes heading would just say it twice. Hidden rather
+    # than emptied: an empty title still reserves its own font height plus
+    # ``pad`` in the layout, which reappears as a gap under the figure title.
+    ax.set_title("")
+    ax.title.set_visible(False)
     written += finish(
       fig,
       theme,
-      runs,
-      f"{spec.title}: {panel.title}",
+      subject,
       out / f"{spec.name}_{panel.slug}",
       output.formats,
       output.dpi,
-      output.bare,
+      output.legend,
     )
   if output.combined:
     rows, cols = spec.grid
+    sheet_width = width * cols * 0.82
+    subject = subject_for(spec.title, runs, sheet_width, output)
     fig, axes = plt.subplots(
-      rows, cols, figsize=(PANEL_SIZE[0] * cols * 0.82, PANEL_SIZE[1] * rows * 0.95)
+      rows,
+      cols,
+      figsize=(sheet_width, plot_height * rows * 0.95 + title_band(subject)),
     )
     fig.patch.set_facecolor(theme.surface)
     flat = np.atleast_1d(axes).reshape(-1)
@@ -481,12 +611,11 @@ def render(
     written += finish(
       fig,
       theme,
-      runs,
-      spec.title,
+      subject,
       out / spec.name,
       output.formats,
       output.dpi,
-      output.bare,
+      output.legend,
     )
   return written
 
@@ -517,7 +646,7 @@ def build_velocity(theme: Theme, runs: list[Run]) -> Figure:
           y_column=achieved,
           title=f"{name}: commanded vs achieved",
           xlabel=f"commanded ({unit})",
-          ylabel=f"episode mean ({unit})",
+          ylabel=f"achieved ({unit})",
           identity=True,
           # Labelled in every panel, not just the first: each one is also a
           # file of its own, where "the panel to my left explains this line" is
@@ -614,7 +743,7 @@ def build_path(theme: Theme, runs: list[Run]) -> Figure:
           command_type="path",
           column="mean_path_dist",
           title="Distance to the path",
-          xlabel="episode mean cross-track distance (m)",
+          xlabel="mean cross-track distance (m)",
         ),
       ),
       Panel(
@@ -627,7 +756,7 @@ def build_path(theme: Theme, runs: list[Run]) -> Figure:
           command_type="path",
           column="max_path_dist",
           title="Worst excursion",
-          xlabel="episode max cross-track distance (m)",
+          xlabel="max cross-track distance (m)",
         ),
       ),
       Panel(
@@ -665,7 +794,7 @@ def build_footstep(theme: Theme, runs: list[Run]) -> Figure:
           command_type="footstep",
           column="step_err_xy",
           title="Placement error",
-          xlabel="episode mean |xy error| (m)",
+          xlabel="mean |xy error| (m)",
         ),
       ),
       Panel(
@@ -678,7 +807,7 @@ def build_footstep(theme: Theme, runs: list[Run]) -> Figure:
           command_type="footstep",
           column="step_err_yaw",
           title="Foot orientation error",
-          xlabel="episode mean |yaw error| (deg)",
+          xlabel="mean |yaw error| (deg)",
           scale=180.0 / math.pi,
         ),
       ),
@@ -696,8 +825,8 @@ def build_footstep(theme: Theme, runs: list[Run]) -> Figure:
           x_column="step_err_xy",
           y_column="step_err_yaw",
           title="Linear vs angular error",
-          xlabel="episode mean |xy error| (m)",
-          ylabel="episode mean |yaw error| (deg)",
+          xlabel="mean |xy error| (m)",
+          ylabel="mean |yaw error| (deg)",
           y_scale=180.0 / math.pi,
         ),
       ),
@@ -715,7 +844,7 @@ def build_footstep(theme: Theme, runs: list[Run]) -> Figure:
           command_type="footstep",
           column="step_err_xy_max",
           title="Worst landing",
-          xlabel="episode max |xy error| (m)",
+          xlabel="max |xy error| (m)",
         ),
       ),
     ],
@@ -755,7 +884,7 @@ def build_kick(theme: Theme, runs: list[Run]) -> Figure:
           command_type="kick",
           column="kick_aim_error",
           title="Aim error",
-          xlabel="|ball direction − commanded| (deg)",
+          xlabel="aim error (deg)",
           scale=180.0 / math.pi,
         ),
       ),
@@ -823,7 +952,7 @@ def build_stand(theme: Theme, runs: list[Run]) -> Figure:
           command_type="stand",
           column="posture_rms",
           title="Posture",
-          xlabel="RMS joint deviation from default (rad)",
+          xlabel="RMS joint deviation (rad)",
         ),
       ),
     ],
@@ -904,7 +1033,17 @@ class PlotConfig:
   the individual files are the deliverable, the sheet is for reviewing them."""
   bare: bool = False
   """Drop the title, leaving the plot alone. For a figure whose document
-  supplies the caption. The legend stays."""
+  supplies the caption. The legend stays unless ``--legend off`` drops it."""
+  legend: str = LEGEND_BELOW
+  """Where the legend naming the runs goes: ``below`` the plot in its own band,
+  ``inside`` the plot's top-left corner (no band, so the plot gets that space
+  back, at the cost of covering whatever sits in that corner), or ``off``.
+  ``off`` leaves two or more runs distinguishable by colour alone, so use it
+  only where a caption or a shared legend elsewhere names them."""
+  font_scale: float = DEFAULT_FONT_SCALE
+  """Multiplier on every point size -- titles, axis labels, ticks, legend and
+  annotations alike. The title and legend bands scale with it, so the layout
+  follows the text instead of colliding with it."""
   theme: str = "light"
   """``light`` or ``dark``. The dark palette is its own set of steps for the
   dark surface, not an inversion."""
@@ -936,11 +1075,25 @@ def main(cfg: PlotConfig) -> None:
   formats = FORMATS.get(cfg.format.lower())
   if formats is None:
     raise SystemExit(f"--format must be one of {sorted(FORMATS)}, got '{cfg.format}'.")
+  if cfg.font_scale <= 0.0:
+    raise SystemExit(f"--font-scale must be positive, got {cfg.font_scale}.")
+  legend = cfg.legend.lower()
+  if legend not in LEGEND_PLACEMENTS:
+    raise SystemExit(
+      f"--legend must be one of {list(LEGEND_PLACEMENTS)}, got '{cfg.legend}'."
+    )
 
   labels = cfg.labels or tuple(path.resolve().name for path in cfg.runs)
   runs = [load_run(path, label) for path, label in zip(cfg.runs, labels, strict=True)]
   out = cfg.out or (cfg.runs[0] / "plots")
-  output = Output(formats=formats, dpi=cfg.dpi, bare=cfg.bare, combined=cfg.combined)
+  set_font_scale(cfg.font_scale)
+  output = Output(
+    formats=formats,
+    dpi=cfg.dpi,
+    bare=cfg.bare,
+    combined=cfg.combined,
+    legend=legend,
+  )
 
   present = [name for name in cfg.types if any(name in run.tables for run in runs)]
   missing = [name for name in cfg.types if name not in present]

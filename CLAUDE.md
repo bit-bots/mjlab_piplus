@@ -484,7 +484,9 @@ plot**, named `<command type>_<plot>.pdf`:
 uv run python -m mjlab_piplus.tasks.eval.plot_eval --runs logs/eval/<run>
 uv run python -m mjlab_piplus.tasks.eval.plot_eval \
   --runs logs/eval/<a> logs/eval/<b> --labels baseline candidate
-  ... --bare              # no title or provenance line: the document captions it
+  ... --bare              # no title at all: the document's caption names it
+  ... --legend inside     # legend in the plot's top-left corner; or 'off'
+  ... --font-scale 1.0    # every point size; default 1.5, bands scale with it
   ... --combined          # also write the multi-panel sheet per type
   ... --format png|both   # default pdf (vector); dpi only affects the raster
   ... --theme dark        # its own steps for the dark surface, not an inversion
