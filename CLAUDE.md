@@ -468,7 +468,9 @@ field, plus the run config). `uv run play Mjlab-MultiEval-PiPlus
 
 **What is measured.** Velocity: mean absolute tracking error in `vx`, `vy` and
 `wz` after a 1 s warmup (the acceleration out of a standstill is a step
-response, not tracking). Goal pose: time to the goal, split into
+response, not tracking), plus the signed achieved mean beside it — the absolute
+error is the accuracy, the signed mean is what separates a consistent
+under-shoot from jitter around the right value. Goal pose: time to the goal, split into
 position-only and full pose, plus final/min distance and yaw error. Path: mean
 and max distance to the reference path, and time to goal. Footstep: xy, z and
 yaw error of each landing against the target that was **latched** for it at
@@ -486,6 +488,7 @@ uv run python -m mjlab_piplus.tasks.eval.plot_eval \
   --runs logs/eval/<a> logs/eval/<b> --labels baseline candidate
   ... --bare              # no title at all: the document's caption names it
   ... --legend inside     # legend in the plot's top-left corner; or 'off'
+  ... --no-tex            # skip LaTeX; matplotlib draws the serif face itself
   ... --font-scale 1.0    # every point size; default 1.5, bands scale with it
   ... --combined          # also write the multi-panel sheet per type
   ... --format png|both   # default pdf (vector); dpi only affects the raster
@@ -496,12 +499,29 @@ So `goal_pose` yields exactly `goal_pose_time_vs_distance.pdf`,
 `goal_pose_final_distance.pdf` and `goal_pose_outcomes.pdf`. Files land in
 `<first run>/plots` unless `--out` says otherwise. The contact sheet is off by
 default — the individual files are the deliverable, the sheet is for reviewing
-them at a glance. The form follows each type's question: commanded-vs-achieved scatter against the `y = x`
-line for velocity and kick speed, time-to-goal against how far the goal *was*
+them at a glance. The form follows each type's question: for velocity, achieved
+against commanded on the `y = x` line (a slope is a gain, an offset a bias) and
+absolute error against the size of the ask; commanded-vs-achieved on `y = x`
+for kick speed; time-to-goal against how far the goal *was*
 for path and goal pose (a slow episode over 8 m is not the slow episode over
 1 m), and ECDFs for every error distribution — several runs overlay without
 occluding each other, and the median and the tail are both readable, which a
 histogram gives up. Rates are horizontal bars, direct-labelled.
+
+**Typography.** Text is set in Times through LaTeX (`text.usetex`), with
+`newtxtext,newtxmath` so the symbols that must go through math mode (`≤`, the
+`|…|` in the axis labels) come out in Times rather than Computer Modern beside
+it. The PDF then carries embedded Type 1 outlines and no Type 3, which is what
+a publisher's font check asks for; `--no-tex` falls back to matplotlib's own
+serif and Type 42 TrueType (`pdf.fonttype: 42`). Point sizes stay the script's
+own — `font.size` is deliberately left at its default, because `tight_layout`
+measures its padding in font sizes and the title and legend bands were tuned
+against that.
+
+> ⚠️ **Every string is escaped for LaTeX** (`tex()`). Run labels are directory
+> names (`det_a`) and the bar labels carry percent signs — an unescaped `_` or
+> `%` ends a usetex render with "Missing $ inserted" instead of a figure, so
+> any new label must go through it too.
 
 > ⚠️ **At most three runs per plot.** The scatter panels put every pair of
 > series on screen at once, and only the first three slots of the palette clear

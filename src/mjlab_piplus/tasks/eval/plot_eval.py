@@ -15,9 +15,11 @@ What each panel is for
 ----------------------
 The form follows the question each command type asks:
 
-* **velocity** -- commanded against achieved, one panel per axis, with the
-  ``y = x`` line the policy is trying to sit on; below it the error
-  distribution, which is what the summary's mean collapses.
+* **velocity** -- three readings per axis: what the robot achieved against
+  what it was asked for (the slope off ``y = x`` is a gain, an offset is a
+  bias), the absolute error against the size of the ask (does tracking degrade
+  with the command?), and that error as a distribution, which is what the
+  summary's mean collapses.
 * **goal_pose** / **path** -- time to goal against how far away the goal was,
   because a slow episode over 8 m is not the same result as a slow one over 1 m.
 * **footstep** -- the distribution of per-episode placement error, plus the
@@ -37,12 +39,18 @@ cannot look like a run that scores well on a hundred.
 Colours are the ``dataviz`` reference palette's first three categorical slots
 (the set validated for all-pairs use in both light and dark) and its chart
 chrome. One run gets slot 1 and no legend -- the title names it.
+
+Text is set in a serif face through LaTeX by default (``--no-tex`` to skip it),
+with Type 42 outlines in the PDF, so a figure drops into an IEEE-style document
+without a font complaint. Point sizes are the script's own, not LaTeX's.
 """
 
 from __future__ import annotations
 
 import csv
 import math
+import shutil
+import subprocess
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -80,7 +88,9 @@ class Theme:
 
 
 LIGHT = Theme(
-  surface="#fcfcfb",
+  # Plain white rather than the palette's off-white: these go onto a white
+  # page, where an almost-white panel reads as a misprinted block.
+  surface="#ffffff",
   ink="#0b0b0b",
   ink_secondary="#52514e",
   muted="#898781",
@@ -115,6 +125,92 @@ BASE_FONT = {
   "note": 7.5,
   "annotation": 8.0,
 }
+# Text that LaTeX would read as markup, and the glyphs it has no character for.
+# Applied to every string the figures show, because the run labels are
+# directory names (``det_a``) and the bar labels carry percent signs -- both of
+# which end a usetex render with "Missing $ inserted" rather than a figure.
+_TEX_ESCAPES = (
+  ("\\", r"\textbackslash{}"),
+  ("&", r"\&"),
+  ("%", r"\%"),
+  ("$", r"\$"),
+  ("#", r"\#"),
+  ("_", r"\_"),
+  ("{", r"\{"),
+  ("}", r"\}"),
+  ("~", r"\textasciitilde{}"),
+  ("^", r"\textasciicircum{}"),
+  ("≤", r"$\leq$"),
+  ("|", r"$|$"),
+  ("—", "---"),
+  ("–", "--"),
+  ("−", r"$-$"),
+  ("…", r"$\ldots$"),
+  ("·", r"$\cdot$"),
+)
+
+
+def tex(text: str) -> str:
+  """Make a string safe for the active text renderer.
+
+  A no-op unless ``text.usetex`` is on, so the same labels read correctly in
+  both modes rather than being written twice.
+  """
+  if not plt.rcParams.get("text.usetex", False):
+    return text
+  for raw, escaped in _TEX_ESCAPES:
+    text = text.replace(raw, escaped)
+  return text
+
+
+def _has_package(name: str) -> bool:
+  """Is a LaTeX package installed? ``kpsewhich`` is the authority, not a guess."""
+  if shutil.which("kpsewhich") is None:
+    return False
+  found = subprocess.run(
+    ["kpsewhich", f"{name}.sty"], capture_output=True, text=True, check=False
+  )
+  return bool(found.stdout.strip())
+
+
+def set_typography(use_tex: bool) -> bool:
+  """Serif figures with embedded TrueType outlines, LaTeX-set where possible.
+
+  Returns whether LaTeX is actually driving the text. ``font.size`` is left
+  alone: every string here is drawn at an explicit ``pt(role)``, and the rcParam
+  would only change ``tight_layout``'s padding, which is measured in font
+  sizes and is what the title and legend bands were tuned against.
+  """
+  latex = use_tex and shutil.which("latex") is not None
+  if use_tex and not latex:
+    print("[WARN] text.usetex requested but `latex` is not on PATH; using the")
+    print("       serif fallback (mathtext). Install TeX Live for IEEE output.")
+  plt.rcParams.update(
+    {
+      "text.usetex": latex,
+      "font.family": "serif",
+      # Times where the system has it, and Nimbus Roman (its metric clone) or
+      # DejaVu Serif behind it, so the fallback still reads as a serif figure.
+      "font.serif": ["Times", "Times New Roman", "Nimbus Roman", "DejaVu Serif"],
+      # Type 42 = TrueType outlines embedded in the PDF/PS rather than raster
+      # or Type 3, which is what a publisher's font check asks for.
+      "pdf.fonttype": 42,
+      "ps.fonttype": 42,
+      # Only reached without usetex; keeps any math in the same serif key.
+      "mathtext.fontset": "stix",
+    }
+  )
+  if latex:
+    # Text *and* math in Times. Without this the symbols that have to go
+    # through math mode (the ``<=`` and the ``|...|`` in the axis labels) come
+    # out in Computer Modern beside Times text, which is exactly the mismatch a
+    # publisher's font check is looking for. newtx is TeX Live's maintained
+    # Times pair; mathptmx is the older fallback.
+    package = "newtxtext,newtxmath" if _has_package("newtxtext") else "mathptmx"
+    plt.rcParams["text.latex.preamble"] = f"\\usepackage{{{package}}}"
+  return latex
+
+
 # Where the run legend goes: under the plot (its own band), in the plot's top
 # left corner (costing no band but covering whatever is there), or nowhere.
 LEGEND_BELOW = "below"
@@ -188,9 +284,9 @@ def load_run(path: Path, label: str) -> Run:
 def style_axes(ax, theme: Theme, title: str, xlabel: str, ylabel: str) -> None:
   """Hairline grid, two spines, muted axis ink. Everything recessive but the data."""
   ax.set_facecolor(theme.surface)
-  ax.set_title(title, color=theme.ink, fontsize=pt("title"), pad=8)
-  ax.set_xlabel(xlabel, color=theme.ink_secondary, fontsize=pt("label"))
-  ax.set_ylabel(ylabel, color=theme.ink_secondary, fontsize=pt("label"))
+  ax.set_title(tex(title), color=theme.ink, fontsize=pt("title"), pad=8)
+  ax.set_xlabel(tex(xlabel), color=theme.ink_secondary, fontsize=pt("label"))
+  ax.set_ylabel(tex(ylabel), color=theme.ink_secondary, fontsize=pt("label"))
   ax.grid(True, color=theme.grid, linewidth=0.8, linestyle="-")
   ax.set_axisbelow(True)
   for side in ("top", "right"):
@@ -212,7 +308,9 @@ def note_coverage(ax, theme: Theme, notes: list[str]) -> None:
   ax.text(
     0.98,
     0.04,
-    "\n".join(notes),
+    # Line by line: a LaTeX newline is not "\n", so the lines are escaped
+    # individually and joined by a real one.
+    "\n".join(tex(note) for note in notes),
     transform=ax.transAxes,
     ha="right",
     va="bottom",
@@ -313,7 +411,7 @@ def scatter_panel(
     ax.plot(line, line, color=theme.axis, linewidth=1.0, zorder=2)
     if identity_label:
       ax.annotate(
-        identity_label,
+        tex(identity_label),
         xy=(line[1], line[1]),
         xytext=(-4, 6),
         textcoords="offset points",
@@ -368,7 +466,7 @@ def rate_panel(
       # leaving a blank row that reads as a missing bar.
       finite = math.isfinite(value)
       ax.annotate(
-        f"{value:.0%}" if finite else "not measured",
+        tex(f"{value:.0%}" if finite else "not measured"),
         xy=(value if finite else 0.0, bar.get_y() + bar.get_height() / 2),
         xytext=(4, 0),
         textcoords="offset points",
@@ -377,7 +475,7 @@ def rate_panel(
         color=theme.ink_secondary if finite else theme.muted,
       )
   ax.set_yticks(positions)
-  ax.set_yticklabels(labels)
+  ax.set_yticklabels([tex(label) for label in labels])
   ax.set_ylim(positions[0] - 0.6, positions[-1] + 0.6)
   ax.invert_yaxis()
   ax.set_xlim(0.0, 1.12)
@@ -443,7 +541,7 @@ def finish(
     # Anchored by its top, so a wrapped title grows downward into the band the
     # caller already sized for it.
     fig.suptitle(
-      subject,
+      tex(subject),
       color=theme.ink,
       fontsize=pt("suptitle"),
       va="top",
@@ -467,7 +565,7 @@ def finish(
       # on data. Stacked rather than in a row: a corner is taller than wide.
       box = fig.axes[0].legend(
         handles,
-        labels,
+        [tex(label) for label in labels],
         loc="upper left",
         frameon=True,
         facecolor=theme.surface,
@@ -481,7 +579,7 @@ def finish(
     else:
       box = fig.legend(
         handles,
-        labels,
+        [tex(label) for label in labels],
         loc="lower center",
         bbox_to_anchor=(0.5, inches(0.02) / height),
         ncol=len(labels),
@@ -633,6 +731,9 @@ def build_velocity(theme: Theme, runs: list[Run]) -> Figure:
     ("cmd_yaw_rate", "mean_yaw_rate", "err_yaw_rate", "yaw rate", "rad/s", "yaw_rate"),
   )
   for cmd, achieved, _error, name, unit, slug in axes_spec:
+    # What the robot actually did against what it was asked for: the slope off
+    # ``y = x`` is a systematic gain and an offset is a bias, neither of which
+    # an absolute error can show.
     panels.append(
       Panel(
         f"{slug}_commanded_vs_achieved",
@@ -648,10 +749,32 @@ def build_velocity(theme: Theme, runs: list[Run]) -> Figure:
           xlabel=f"commanded ({unit})",
           ylabel=f"achieved ({unit})",
           identity=True,
-          # Labelled in every panel, not just the first: each one is also a
-          # file of its own, where "the panel to my left explains this line" is
-          # not available.
+          # Labelled in every panel, not just the first: each is also a file of
+          # its own, where "the panel to my left explains this line" is not
+          # available.
           identity_label="y = x",
+        ),
+      )
+    )
+  for cmd, _achieved, error, name, unit, slug in axes_spec:
+    # Error against the command it was measured against, rather than the
+    # achieved velocity: this answers whether tracking degrades with the size
+    # of the ask, which "commanded vs achieved" only shows as a slope. No
+    # ``y = x`` line -- the reference here is y = 0.
+    panels.append(
+      Panel(
+        f"{slug}_error_vs_commanded",
+        f"{name}: error vs commanded",
+        partial(
+          scatter_panel,
+          theme=theme,
+          runs=runs,
+          command_type="velocity",
+          x_column=cmd,
+          y_column=error,
+          title=f"{name}: error vs commanded",
+          xlabel=f"commanded ({unit})",
+          ylabel=f"mean |error| ({unit})",
         ),
       )
     )
@@ -671,7 +794,7 @@ def build_velocity(theme: Theme, runs: list[Run]) -> Figure:
         ),
       )
     )
-  return Figure("velocity", "Velocity tracking", (2, 3), panels)
+  return Figure("velocity", "Velocity tracking", (3, 3), panels)
 
 
 def build_goal_pose(theme: Theme, runs: list[Run]) -> Figure:
@@ -1040,6 +1163,10 @@ class PlotConfig:
   back, at the cost of covering whatever sits in that corner), or ``off``.
   ``off`` leaves two or more runs distinguishable by colour alone, so use it
   only where a caption or a shared legend elsewhere names them."""
+  tex: bool = True
+  """Set the text with LaTeX in a serif (Times) face, the way a paper wants it.
+  Needs ``latex`` on PATH; without it the figures fall back to a serif face
+  drawn by matplotlib. Either way the PDF carries Type 42 outlines."""
   font_scale: float = DEFAULT_FONT_SCALE
   """Multiplier on every point size -- titles, axis labels, ticks, legend and
   annotations alike. The title and legend bands scale with it, so the layout
@@ -1087,6 +1214,7 @@ def main(cfg: PlotConfig) -> None:
   runs = [load_run(path, label) for path, label in zip(cfg.runs, labels, strict=True)]
   out = cfg.out or (cfg.runs[0] / "plots")
   set_font_scale(cfg.font_scale)
+  set_typography(cfg.tex)
   output = Output(
     formats=formats,
     dpi=cfg.dpi,

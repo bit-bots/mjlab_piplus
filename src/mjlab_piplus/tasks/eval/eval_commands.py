@@ -203,12 +203,25 @@ class EvalVelocityCommand(UniformVelocityCommandWithStop, _EvalMixin):
     # handed at a standstill; scoring them measures the step response, not the
     # tracking accuracy the command asks about.
     counted = (self.eval_elapsed_s >= self.cfg.warmup_s).float().unsqueeze(1)
+    # Absolute per step, then averaged: the signed error averages toward zero
+    # over a gait cycle, and a robot that overshoots half the time and
+    # undershoots the other half would score perfect.
     self._err += (measured - self.vel_command_b).abs() * counted
+    # The signed velocity itself, which the error deliberately throws away.
     self._achieved += measured * counted
     self._samples += counted.squeeze(1)
     super().eval_update()
 
   def eval_record(self) -> dict[str, torch.Tensor]:
+    """Both readings of the same episode, per axis.
+
+    ``err_*`` is the accuracy: absolute per step, so it cannot cancel. But
+    taking the absolute value throws away the *sign*, which is what separates a
+    policy that consistently undershoots from one that jitters around the right
+    value -- so the signed ``mean_*`` is reported beside it. Read ``err_*`` for
+    how well the command was followed and ``mean_*`` against the command for
+    whether the miss has a direction.
+    """
     n = self._samples
     err = _mean(self._err, n.unsqueeze(1))
     achieved = _mean(self._achieved, n.unsqueeze(1))
