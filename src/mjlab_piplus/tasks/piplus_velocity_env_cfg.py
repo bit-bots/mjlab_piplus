@@ -225,12 +225,12 @@ def piplus_velocity_env_cfg(
         # x/y start small and are ramped up by the ``push_velocity`` curriculum
         # (below); z/roll/pitch/yaw are left untouched by the curriculum.
         "velocity_range": {
-          "x": (-0.75, 0.75),
-          "y": (-0.75, 0.75),
-          "z": (-0.0, 0.0),
-          "roll": (-0.8, 0.8),
-          "pitch": (-0.8, 0.8),
-          "yaw": (-0.0, 0.0),
+          "x": (-0.25, 0.25),
+          "y": (-0.25, 0.25),
+          "z": (-0.15, 0.15),
+          "roll": (-0.52, 0.52),
+          "pitch": (-0.52, 0.52),
+          "yaw": (-0.78, 0.78),
         },
       },
     ),
