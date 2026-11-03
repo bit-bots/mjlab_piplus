@@ -305,7 +305,7 @@ class PathCommand(CommandTerm):
     self.obstacles[pending, :, 1:3] += offset
     self._pending_align[pending] = False
 
-  def _update_command(self) -> None:
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
     # get closest point on path to robot
     self._update_robot_pose()
     self._align_pending()

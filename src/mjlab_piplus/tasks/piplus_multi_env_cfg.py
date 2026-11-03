@@ -1,9 +1,9 @@
 """Multi-command env: one policy driven by a velocity, path, footstep, goal-pose,
 kick or stand command.
 
-A single ``MultiCommand`` assigns each env one of three command types and
+A single ``MultiCommand`` assigns each env one of six command types and
 switches between them during the episode, so the policy learns the hand-over
-between modes rather than being three separate policies.
+between modes rather than being six separate policies.
 
 The policy sees every sub-command concatenated with the inactive blocks zeroed,
 prefixed by a one-hot naming the active type:
@@ -20,12 +20,12 @@ zero-velocity *velocity* command means walk-in-place. Reward terms that only
 apply to some command types carry ``command_weights``; terms without the field
 apply at full weight everywhere.
 
-Fall recovery is folded in rather than being a command of its own: a fraction of
-envs respawn on the floor, there is no fall termination, and the getup terms are
-live under every command type. See ``mdp/getup.py`` and the "Getup" constants
-below. This is also the only task that actuates the arms (20 DoF), so its
-left-right mirror is ``PiPlusMultiSymmetry`` (``JOINT_ORDER_20`` plus a block
-per sub-command), not the 12-DoF ``PiPlusSymmetry`` the other tasks use.
+There is no fall recovery: a fall ends the episode (``fell_over`` past 60 deg, or
+``root_height_below_minimum``) and ``is_terminated`` charges a one-off penalty.
+Every env spawns standing. This is also the only task that actuates the arms
+(20 DoF), so its left-right mirror is ``PiPlusMultiSymmetry`` (``JOINT_ORDER_20``
+plus a block per sub-command), not the 12-DoF ``PiPlusSymmetry`` the other tasks
+use.
 
 This config is standalone -- it deliberately does not derive from
 ``piplus_velocity_env_cfg`` -- so the two tasks can be tuned independently.
@@ -918,7 +918,6 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "force_threshold": 2.0,
       },  # we dont want even soft collisions
     ),
-    # Gated for getup
     "posture": MultiRewardTermCfg(
       func=pi_mdp.variable_posture,
       weight=1.0,
@@ -1053,8 +1052,8 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       params={"min_fraction": 0.5},
     ),
     # A fall ends the episode. This was a getup *deadline* while the robot was
-    # expected to recover from falls; with that gone, the walking convention
-    # applies again -- the same 70 deg limit the velocity task uses.
+    # expected to recover from falls; with that gone, falls are terminal again
+    # -- at 60 deg, tighter than the velocity task's 70.
     "fell_over": TerminationTermCfg(
       func=mdp.bad_orientation,
       params={
@@ -1200,7 +1199,7 @@ def piplus_multi_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # poses, and the contact count is bounded by how many collision geoms can
     # touch a plane at once: measured peak is 19 in any single world across
     # 512 envs x 400 steps of standing, of thrashing under random actions, and
-    # of being force-tipped to 65 and 89 degrees. 30 is ~58% headroom.
+    # of being force-tipped to 65 and 89 degrees. 45 is ~2.4x headroom.
     #
     # Contacts past nconmax are dropped *silently* and look like the robot
     # sinking through the floor, so re-measure before trimming further -- and

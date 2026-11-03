@@ -11,26 +11,38 @@ This is a [mjlab](https://github.com/mujocolab/mjlab) project for training RL po
 Always use `uv run`, not `python` directly.
 
 ```sh
-# Train — launch as a background process via Bash run_in_background=true (NOT tmux), auto-select a free GPU via nvidia-smi
-# After launch, poll wandb/ dir for new run-YYYYMMDD_HHMMSS-* directories
-# (verify timestamp matches current time, as runs take time to initialize).
-# Inside the dir, find the run-<id>.wandb file — the ID is in the filename.
-# Read the first few lines of that file to find a path like
-# logs/rsl_rl/piplus_velocity/2026-04-12_23-56-38 — the last segment is the
-# run name. Then prepend a line to runs.log (newest first):
-# <name>: <id>: <short summary>
-uv run train Mjlab-Velocity-PiPlus --env.scene.num-envs 4096 --gpu-ids '[GPU]'
+# <task-id> is any registered task (see "Task registration"), e.g.
+# Mjlab-Velocity-PiPlus or Mjlab-Multi-PiPlus. <experiment> is that task's
+# experiment_name in its RL cfg, e.g. piplus_velocity or piplus_multi.
+#
+# GPU selection (train and play alike): pin each process to exactly ONE GPU
+# with CUDA_VISIBLE_DEVICES=<n> — one GPU per run is the most efficient setup.
+# Pick it via nvidia-smi: prefer an unused GPU; if all are busy, one with low
+# utilization and free memory.
 
-# Play/evaluate a trained policy — launch as a background process via Bash run_in_background=true (NOT tmux), pick a free GPU via nvidia-smi
-# Export CUDA_VISIBLE_DEVICES to a single GPU before launching.
-# Prefer unused GPUs; if all busy, pick one with low utilization and free memory.
+# Train — launch as a background process via Bash run_in_background=true (NOT tmux).
+CUDA_VISIBLE_DEVICES=<n> uv run train <task-id> --env.scene.num-envs 4096
+# After launch, find the new run's W&B ID and run name:
+# - Preferred: use the W&B Claude Code skill (e.g. wandb-primary) if it is
+#   available, to list the newest runs in jgueldenstein/mjlab_piplus and pick
+#   the one created just now.
+# - Fallback: poll wandb/ for a new run-YYYYMMDD_HHMMSS-* directory (verify
+#   the timestamp matches the current time, as runs take time to initialize).
+#   The ID is in the filename of the run-<id>.wandb file inside it; its first
+#   few lines contain a path like logs/rsl_rl/<experiment>/2026-04-12_23-56-38.
+# The run name is the log directory's last segment (the timestamp). Then
+# prepend a line to runs.log at the repo root (newest first; create the file
+# if it does not exist yet):
+# <name>: <id>: <short summary>
+
+# Play/evaluate a trained policy — launch as a background process via Bash run_in_background=true (NOT tmux).
 # When playing multiple runs, always run them SEQUENTIALLY — wait for each to
 # finish before starting the next, not in parallel.
-CUDA_VISIBLE_DEVICES=GPU uv run play Mjlab-Velocity-PiPlus --wandb-run-path jgueldenstein/mjlab_piplus/<id>
+CUDA_VISIBLE_DEVICES=<n> uv run play <task-id> --wandb-run-path jgueldenstein/mjlab_piplus/<id>
 
 # Sanity-check with dummy agents (no training needed)
-uv run play Mjlab-Velocity-PiPlus --agent zero
-uv run play Mjlab-Velocity-PiPlus --agent random
+CUDA_VISIBLE_DEVICES=<n> uv run play <task-id> --agent zero
+CUDA_VISIBLE_DEVICES=<n> uv run play <task-id> --agent random
 
 # Format and lint
 uv run ruff format
@@ -46,12 +58,21 @@ uv run pyright     # thorough
 ### Package layout
 
 - `src/mjlab_piplus/robot/` — Robot definition: MuJoCo XML spec, actuator configs (PD gains, effort limits, delay), collision configs, and home keyframe pose.
-- `src/mjlab_piplus/tasks/` — Task registration and configs: environment config (observations, rewards, terminations, curriculum) and RL runner config (PPO hyperparameters).
+- `src/mjlab_piplus/objects/` — Non-robot entities; `ball.py` is the kick ball (`get_ball_cfg`).
+- `src/mjlab_piplus/tasks/` — Task registration and one `*_env_cfg.py` / `*_rl_cfg.py` pair per task.
+- `src/mjlab_piplus/tasks/mdp/` — Custom MDP terms. Sub-packages `path_following/` (A* path library, path command and rewards) and `footstep/` (footstep command and rewards); kick, goal-pose, stand and the `MultiCommand` composite live in `kick.py`, `commands.py` and `multi_command.py`, the per-command reward weighting in `multi_rewards.py`.
 
 
 ### Task registration
 
-Tasks are registered in `src/mjlab_piplus/tasks/__init__.py` via `register_mjlab_task()`. The package entry point `mjlab.tasks` (declared in `pyproject.toml`) causes mjlab's CLI to discover the task automatically. The registered task ID is `"Mjlab-Velocity-PiPlus"`.
+Tasks are registered in `src/mjlab_piplus/tasks/__init__.py` via `register_mjlab_task()`. The package entry point `mjlab.tasks` (declared in `pyproject.toml`) causes mjlab's CLI to discover them automatically. Registered task IDs:
+
+| task ID | env cfg | what it is |
+|---|---|---|
+| `Mjlab-Velocity-PiPlus` | `piplus_velocity_env_cfg.py` | 12-DoF velocity tracking |
+| `Mjlab-Path-PiPlus` | `piplus_path_env_cfg.py` | 12-DoF path following |
+| `Mjlab-Multi-PiPlus` | `piplus_multi_env_cfg.py` | 20-DoF, six command types incl. kick — see below |
+| `Mjlab-StandupImitation-PiPlus` | `piplus_standup_imitation_env_cfg.py` | validation env for the getup teacher bridge |
 
 ### Robot definition (`piplus_constants.py`)
 
@@ -94,7 +115,7 @@ Collision configs (`FULL_COLLISION`, `LEG_ONLY_COLLISION`, `FEET_ONLY_COLLISION`
 The function `piplus_velocity_env_cfg(play=False)` builds a `ManagerBasedRlEnvCfg`. Key design choices:
 
 - **Actor obs**: base angular velocity, projected gravity, joint pos/vel relative to default, last action, gait phase (sin/cos), velocity command. The sensor-derived terms (ang vel, gravity, joint pos/vel) are noised; actions, phase, and command are not.
-- **Critic obs**: actor obs + base linear velocity, foot height (from `TerrainHeightSensorCfg`), foot air time, foot contact, foot contact forces. No noise.
+- **Critic obs**: actor obs + base linear velocity, foot air time, foot contact, foot contact forces. No noise. (`foot_height` from the terrain height scan is commented out here; the multi task's critic does use it.)
 
 > ⚠️ **Symmetry depends on the actor obs layout.** The left-right mirror in
 > `symmetry.py` is a list of `Block`s, one per actor obs term (and one per
@@ -118,37 +139,71 @@ The function `piplus_velocity_env_cfg(play=False)` builds a `ManagerBasedRlEnvCf
 
 - **Sensors**: `ContactSensorCfg` for feet ground contact (ankle roll link subtrees vs. terrain), self-collision sensor, terrain height scan anchored at foot sites.
 - **Curriculum**: velocity command ranges ramp up in two stages, from step 0 to step 800 × 24 (`command_vel`).
-- **Terminations**: time out (20 s episodes), orientation > 45° (`bad_orientation`). The root-height termination is currently commented out.
-- **Simulation**: 5 ms timestep, decimation 4 (→ 50 Hz policy), MuJoCo Warp with 10 solver iterations.
-- In `play` mode: curriculum disabled, episode length unbounded, extra air-time metrics added. Push events stay active.
+- **Terminations**: time out (20 s episodes), orientation > 70° (`fell_over`, via `bad_orientation`). The root-height termination is currently commented out.
+- **Simulation**: 5 ms timestep, decimation 4 (→ 50 Hz policy), MuJoCo Warp with 10 solver iterations, `nconmax=45`.
+- In `play` mode: 1 env, curriculum and all DR disabled (only the two reset events remain — `push_robot` too is off), episode length unbounded, extra air-time / foot-tilt metrics added.
+
+### Multi-command env (`piplus_multi_env_cfg.py`)
+
+One 20-DoF policy (`with_arms=True`, `self_pads=True`) for six command types.
+`MultiCommand` (`mdp/multi_command.py`) assigns each env one type, drawn by
+`fractions` — velocity 0.20, path 0.15, goal_pose 0.15, footstep 0.15, kick
+0.25, stand 0.10 — and redraws on each resample (`change_command_probability`
+0.3), arming the next resample from the *selected* sub-command's own
+`resampling_time_range`. The policy therefore learns the hand-over between
+modes, not six separate behaviours.
+
+| type | cfg | what it asks for |
+|---|---|---|
+| `velocity` | `UniformVelocityCommandWithStopCfg` | twist tracking, `lin_vel_x` up to `MAX_COMMANDED_SPEED` (0.8); stand flag off, so zero means walk-in-place |
+| `path` | `PathCommandCfg` | follow an A* path from the library, re-anchored at the robot (`align=True`) |
+| `footstep` | `FootstepCommandCfg` | hit a timed footstep plan on the gait clock; half from the path library, half Gaussian |
+| `goal_pose` | `GoalPoseCommandCfg` | reach a pose 0.5–8 m away, no reference path |
+| `kick` | `KickCommandCfg` | approach the ball, kick it in a direction at a strength; ball respawns after each kick |
+| `stand` | `StandCommandCfg` | hold the default pose |
+
+- **Actor obs** = the velocity task's proprioception (noised, 1-step delay)
+  + phase + `command` + `ball`. The command block is
+  `[one_hot(6) | velocity(3) | path(2N+2) | footstep(8M) | goal_pose(4) | kick(3)]`
+  with inactive blocks zeroed (N = `NUM_PATH_OBSERVATIONS` = 8,
+  M = `NUM_FOOTSTEP_OBSERVATIONS` = 4). The ball's position/velocity is *not* in
+  the command: it is its own term (`pi_mdp.ball_state`) with a camera-like
+  2–5-step delay, zeroed outside the kick type.
+- **Critic obs** additionally has unbiased joint pos, base lin vel, foot height
+  scan, foot air time / contact / contact forces.
+- **Per-command rewards.** Task terms are `MultiRewardTermCfg`
+  (`mdp/multi_rewards.py`), whose `command_weights` scale the term per active
+  type (missing = 1.0, `None` = everywhere). Presets at the top of the file:
+  `VELOCITY_AND_STAND`, `PATH_ONLY`, `FOOTSTEP_ONLY`, `GOAL_POSE_ONLY`,
+  `KICK_ONLY`, `STAND_BOOSTED` (×3 under stand). Safety/gait terms
+  (`upright`, `foot_gait`, `feet_phase`, `self_collisions`, ...) are plain
+  `RewardTermCfg` and apply everywhere.
+- **Curriculum** (kick only): `drop_kick_contact` zeroes the flat per-contact
+  bootstrap at iteration 1500; `narrow_kick_aim` narrows the aim sigma 60° → 20°
+  linearly from iteration 1500 to 6400. The aim terms pay *negative* outside the
+  tolerance, so narrowing too fast makes the robot stop kicking.
+- **Play mode**: 1 env, only the reset events (no DR, no push), unbounded
+  episodes, small path libraries (200); switch type with the viewer dropdown.
+
 
 ### Falls in the multi task
 
-There is **no getup**. A fall ends the episode (`fell_over`, `bad_orientation`
-past 70 deg, the same limit the velocity task uses) and `is_terminated` charges
--200 once. Everything that supported fall recovery was removed: the
-`getup_imitation` and `on_ground` rewards, the `fallen_too_long` deadline, the
-`fallen`/`getup_success` metrics, and the `GatedRewardTermCfg` wrappers on all
-ten walking and safety terms — those gates existed only to fade walking rewards
-out while the robot was down, and with falls terminal there is nothing to fade.
-The reset is back to the walking task's `reset_base` (`reset_root_state_uniform`)
-+ `reset_robot_joints` (`reset_joints_by_offset`) pair, replacing
-`reset_fallen_or_standing`.
+There is **no getup**. A fall ends the episode — `fell_over` (`bad_orientation`
+past **60°**) or `root_height_below_minimum` (0.25 m, the backstop for a squat,
+which is vertical and so invisible to `fell_over`) — and `is_terminated`
+charges -200 once. The reset is the walking task's `reset_base` +
+`reset_robot_joints` pair. The getup rewards, deadline, metrics and gated
+reward wrappers were all removed; the getup machinery lives on only in
+`Mjlab-StandupImitation-PiPlus` (below).
 
-The getup machinery itself still exists and is still used — see
-`mdp/getup.py`, `mdp/imitation.py` and `Mjlab-StandupImitation-PiPlus` below.
-It is only the multi task that no longer uses it.
-
-> ⚠️ **`nconmax` is 30**, down from the 120 getup needed. A robot lying on its
-> back touches the floor with the whole trunk, both arms and both legs at once
-> (~43 contacts). With falls terminal it never reaches those poses, and the
-> count is bounded by how many collision geoms can touch a plane at once: the
+> ⚠️ **`nconmax` is 45**, down from the 120 getup needed (a robot on its back
+> makes ~43 contacts). With falls terminal it never reaches those poses: the
 > measured peak is **19** in any single world across 512 envs x 400 steps of
 > standing, of thrashing under random actions, and of being force-tipped to 65
 > and 89 degrees. Contacts past `nconmax` are dropped *silently* and look like
-> the robot sinking through the floor, so re-measure before trimming further,
-> and raise it for anything that puts the robot on the ground on purpose or for
-> terrain that is not a plane. Measured cost at 2048 envs: 120 -> 3384 MB,
+> the robot sinking through the floor, so re-measure before trimming, and raise
+> it for anything that puts the robot on the ground on purpose or for terrain
+> that is not a plane. Measured cost at 2048 envs: 120 -> 3384 MB,
 > 45 -> 2264 MB, 30 -> 2038 MB of process GPU memory.
 
 - **The arms stay actuated** (`with_arms=True`, 20 DoF). They were enabled for
@@ -174,8 +229,9 @@ goal-pose env that has arrived is still under a *moving* command and keeps the
 walking regime. `MultiCommandCfg.stand_command_name` (default `"stand"`) names
 the type the mask reads.
 
-> ⚠️ **`std_standing` at 0.05 loses the stand pose entirely, and the loss is
-> permanent.** `variable_posture` is one exponent over all 20 joints, so the
+> ⚠️ **`std_standing` is 0.1 now (all joints); the history below is why it
+> must not go back to 0.05.** At 0.05 the stand pose was lost entirely and
+> permanently. `variable_posture` is one exponent over all 20 joints, so the
 > standing regime's tolerance is a cliff, not a slope. Measured on
 > `bp9zuz30` (std 0.05), forcing every env onto the stand command, no DR:
 >
@@ -204,13 +260,13 @@ the type the mask reads.
 > RMS of 0.3 is still a dead 0.0004 — so treat any *transient* excursion during
 > early training as permanent.
 
-> ⚠️ **Standing is scored more leniently than walking, which is backwards.**
+> ⚠️ **With std 0.05, standing was scored more leniently than walking.**
 > Same policy, same checkpoint, per-step posture payout: **0.85 under a velocity
 > command** (std_walking, weight 1.0, RMS 0.13), **0.11 under kick**, **0.0000
-> under stand** (std_standing, weight 3.0). The 3x stand boost is multiplying a
-> term the tight std has already zeroed. Under walking the term is alive and it
-> shows — the arms sit within 0.02 rad of default while walking and 2.03 rad
-> from it while standing.
+> under stand** (std_standing 0.05, ×3 from `STAND_BOOSTED`). The boost was
+> multiplying a term the tight std had already zeroed — the arms sat within
+> 0.02 rad of default while walking and 2.03 rad from it while standing.
+> Re-check this payout split if you touch `std_standing`.
 
 ### Action scale
 
@@ -250,165 +306,39 @@ rad, so 0.5 is cheap for them), against `thigh` 0.27 -> 1.35, `hip_roll`
 small precise work and drown. **`thigh` included, despite its 2.77 rad range**,
 which is exactly why range is the wrong criterion.
 
-### Getup by imitation (`mdp/imitation.py`)
+### Getup by imitation (`mdp/imitation.py`, `Mjlab-StandupImitation-PiPlus`)
 
-Instead of discovering a stand-up from shaped rewards, the fallen robot is paid
-for reproducing what an already-trained getup policy would do from the same
-state. The teacher is a checkpoint from the reference env in `mjlab_playground`
-(`getup_model.pt` at the repo root); `GETUP_TEACHER_CHECKPOINT` names it.
+Not used by the multi task any more; kept for the standalone validation task.
+The fallen robot is paid `exp(-mean_j (Δq)^2 / std^2)` for matching the **joint
+position target** a trained getup teacher (`getup_model.pt`, from
+`mjlab_playground`; `GETUP_TEACHER_CHECKPOINT`) would command from the same
+state. Comparing targets in radians bridges the teacher's
+`RelativeJointPositionAction` (`joint_pos + 0.6a`) and this env's
+default-relative action. `piplus_standup_imitation_env_cfg.py` makes that
+reward (weight 4.0) plus the reference's three height/orientation shaping terms
+the whole objective: every env spawns fallen, the actor obs is exactly the
+teacher's 66-vector, and the multi task's DR and obs noise are carried over
+(no push). A teacher-following oracle scores 0.997 on the term and stands the
+robot from 0.09 m to ~0.31–0.35 m.
 
-Two things are bridged, and they are the whole module:
+Gotchas, if you touch it:
 
-- **Observation.** The teacher's actor is a 66 → 20 MLP taking
-  `[base_ang_vel(3) | projected_gravity(3) | joint_pos_rel(20) |
-  joint_vel_rel(20) | last_action(20)]`. The first four are the *same mjlab
-  functions* this env already uses, so they are rebuilt by calling them
-  directly — **not** by slicing this env's actor obs, which has extra terms
-  (phase, command) in a different layout and is noised. The fifth is the
-  **teacher's own** previous output, kept in a buffer here and zeroed on reset;
-  carrying it across an episode boundary would feed it the tail of a different
-  getup. The reference runner sets `obs_normalization=False` on its actor, so
-  there is no normalizer to apply — the loader raises if a checkpoint has one.
-- **Action.** The teacher is a `RelativeJointPositionAction`
-  (`target = joint_pos + a*0.6`); this env is default-relative
-  (`target = default + f(a)`). Comparing raw action vectors would be
-  meaningless. Both are converted to a **joint position target in radians** and
-  the reward is `exp(-mean_j (Δq)^2 / std^2)` over that. This also makes the
-  term indifferent to this env's action scale or to swapping in a nonlinear map.
-  `_processed_actions` is read *before* the encoder-bias subtraction, which is
-  where the teacher's expression sits too, so the bias cancels.
+- The teacher's obs is rebuilt from **true state** with mjlab's own obs
+  functions (not sliced from this env's noised actor obs), relative to the
+  **teacher's** default pose (`TEACHER_DEFAULT_JOINT_POS`, which differs from
+  ours on 9 of 20 joints), with its own last-action buffer zeroed on reset.
+  Joint order is resolved by name (`TEACHER_JOINT_ORDER`).
+- `teacher_biased=False`: the teacher does not see the encoder bias; feeding it
+  the biased position drops getup success from ~0.87 to 0.65.
+- The teacher target is cached from the **pre-step** state the student acted
+  on; recomputing at reward time scored a perfect oracle 0.618.
+- `std` 0.3; tighter hits the exponential dead zone.
+- The playground teacher env shares this DR set; after editing either side run
 
-Joint order is resolved **by name** (`TEACHER_JOINT_ORDER`), not assumed — it
-happens to be the identity for all 20 actuated joints, but a reorder on either
-side would otherwise scramble the mapping silently.
-
-> ⚠️ **The teacher's `joint_pos` observation is relative to the TEACHER's
-> default pose, not this env's.** The reference robot's home keyframe
-> ("walkready") differs from ours on 9 of 20 joints — elbows by 0.7 rad, calves
-> by 0.2, hips and ankles by 0.1, RMS 0.235 — so subtracting our default (what
-> mjlab's `joint_pos_rel` does) offsets the teacher's input by that much.
-> Measured: it changed the teacher's action by mean 0.30 (max 1.55), i.e. a
-> 0.179 rad error in the joint target it asks for, and cost ~0.036 m of the
-> height its getup reaches. `TEACHER_DEFAULT_JOINT_POS` holds the correct pose.
-> Note the consequence: following the teacher drives the robot toward *its*
-> standing pose, not ours — which in the multi task pulls against `posture`.
-
-> ⚠️ **Rewards run after the physics step, but the action being judged was
-> chosen from the pre-step state.** The teacher's target is therefore cached one
-> call earlier, from the state the student actually acted on, rather than
-> recomputed at reward time. During a getup the joints move ~0.06 rad per 20 ms
-> step, and comparing across that gap scored a *perfect* teacher-following
-> oracle **0.618** instead of 0.997. An env's first step after a reset has no
-> cached target from its own episode and scores 0.
-
-> ⚠️ `std` is 0.3, and should not go tighter. An untrained policy sits ~0.39 rad
-> from the teacher; at `std=0.2` that is a reward of 0.018 with gradient 0.44,
-> versus 0.17 and 1.60 at 0.3 — the same exponential-saturation dead zone that
-> kills `posture` when its std is too tight.
-
-The term is gated to the fallen half with `fallen_gate`: the teacher's env has
-no velocity command and it was trained to stand up and *stop*, so ungated it
-would fight the walking controller. `on_ground` is now the mirror image — a flat
-`always_one` at weight -1.0 through the same `fallen_gate`, so the "is it
-fallen" test is the gate rather than something the term re-derives.
-
-### `Mjlab-StandupImitation-PiPlus` — the imitation validation task
-
-`piplus_standup_imitation_env_cfg.py`. A stripped env whose only job is to
-answer "does the teacher bridge work": no commands, no gait shaping, no
-penalties, no ball, no curriculum, no terminations but the time-out. The
-**imitation reward is the entire objective**, so the return is a direct readout
-of how closely the student tracks the teacher, uncontaminated by anything else.
-
-Deliberate differences from the multi task:
-
-- **The imitation term is ungated.** Gating it would blind the reward exactly
-  when the robot succeeds and stands up. (The multi task no longer uses this
-  reward at all — see "Falls in the multi task".)
-- **The three shaping terms come from the reference** at its own weights:
-  `torso_height` 2.0, `head_height` 1.0, `orientation` 1.0, all ungated (gating
-  them on "is fallen" would step the return *down* the instant the robot stands
-  up). They sum to 4.0/step; `IMITATION_WEIGHT` matches that total at 4.0.
-- **No `on_ground` and no terminations but the time-out.** Being on the floor is
-  priced by the height terms falling toward zero there, which is a gradient
-  rather than a flat rate.
-- **Every env spawns fallen** (`fall_probability=1.0`).
-- **The actor obs is exactly the teacher's 66-vector**, so the student can in
-  principle represent the teacher and a poor score is evidence about the bridge
-  rather than a missing input.
-
-It carries the multi task's **domain randomization** (all 11 startup terms) and
-**observation noise + 1-step delay**, verbatim, so a policy that works here is
-answering the same sensing and dynamics question it will face there. No
-`push_robot`: a shove is something to walk off, and this env's only job is
-standing up from the floor.
-
-> ⚠️ **The teacher does not see any of the noise.** `imitation.py` builds its
-> observation from true state, so the target stays a clean function of where the
-> robot actually is while the student reproduces it from noisy, delayed sensing.
-> A teacher fed the same noise would emit a noisy target — variance in the
-> reward with no added information.
-
-That extends to the encoder bias, and it matters. `teacher_biased` defaults
-**False**. Teacher getup success (fraction of envs above 0.29 m after 300 steps,
-256 envs, teacher-following oracle):
-
-| configuration | final base h | success |
-|---|---|---|
-| no DR, no obs noise | 0.329 | 1.00 |
-| no DR, obs noise on | 0.329 | 1.00 |
-| full DR minus `encoder_bias` | 0.327 | 0.98 |
-| full DR, `encoder_bias` at the reference's ±0.0698 | 0.310 | 0.85 |
-| full DR, teacher sees biased position | 0.292 | 0.65 |
-| **full DR, teacher sees true position (default)** | **0.312** | **0.84–0.89** |
-
-The teacher's own env in `mjlab_playground`
-(`getup/config/pi_plus/env_cfgs.py`) now carries **this same DR set and sensor
-noise**, so the next teacher is trained under the conditions it will advise
-under. `getup/config/pi_plus/verify_dr_matches_piplus.py` diffs the two configs
-term by term and exits non-zero on any mismatch — run it after touching either
-side:
-
-```sh
-cd ~/mjlab_piplus && PYTHONPATH=~/mjlab_playground/src uv run python \
-  ~/mjlab_playground/src/mjlab_playground/getup/config/pi_plus/verify_dr_matches_piplus.py
-```
-
-The numbers below predate that change and were measured with `getup_model.pt`
-(iteration 200), trained under the playground's *old* randomization.
-
-Two readings. **Observation noise costs the teacher nothing** — it reads true
-state, so only the student is affected. **`encoder_bias` is the entire DR
-effect**: it is the one randomization that reaches the teacher's input, this env
-runs it at ±0.1 against the ±0.0698 the reference trained on, and a persistent
-per-joint offset is not something a policy can average away. Feeding the teacher
-the true position recovers most of the loss. The residual (0.84 vs 1.00) is the
-physical DR — masses, gains, friction — which the teacher genuinely never saw,
-and `getup_model.pt` is an early (iteration 200) checkpoint.
-
-Measured, 128 envs x 300 steps, no DR (values are per-step, i.e. `reward_buf / dt`):
-
-| policy | total/step | imitation value | base height start → end |
-|---|---|---|---|
-| zero action | 1.233 | 0.0003 | 0.398 → 0.092 |
-| random action | 1.216 | 0.0003 | 0.398 → 0.089 |
-| **teacher-following oracle** | **7.627** | **0.9967** | 0.397 → **0.348** |
-
-The oracle scores 0.997 of a possible 1.0 on the imitation term, ~2500x above
-chance, and the teacher driven through this env's default-relative action term
-genuinely stands the robot up (0.09 collapsed → 0.31). The bridge is exact: the
-student's commanded target matches the teacher's to 2e-8 rad.
-
-Per-term payout, robot held in each pose (max 4.036/step of shaping):
-
-| state | torso_height | head_height | orientation | shaping total |
-|---|---|---|---|---|
-| flat on the floor | 0.519 | 0.150 | 0.500 | 1.171 |
-| standing upright | 2.000 | 1.000 | 1.000 | 4.036 |
-
-So the shaping alone offers 2.87/step for standing up, against up to 2.0/step
-for imitating well. A policy that stands *without* imitating out-scores one that
-imitates on the floor — intended, but worth knowing before reading a run.
+  ```sh
+  cd ~/mjlab_piplus && PYTHONPATH=~/mjlab_playground/src uv run python \
+    ~/mjlab_playground/src/mjlab_playground/getup/config/pi_plus/verify_dr_matches_piplus.py
+  ```
 
 ### Viewer GUI (`mdp/push_gui.py`)
 
@@ -428,9 +358,16 @@ the same mass-independent root-velocity delta as the training-time
 next forward, which is what makes it look like a no-op if you assert on the same
 step.
 
-### RL config (`piplus_velocity_rl_cfg.py`)
+### RL config (`piplus_*_rl_cfg.py`)
 
-PPO with asymmetric actor-critic (actor/critic each 512-256-128 MLP, ELU activation). Logs to W&B project `mjlab_piplus`. 24 steps per env per rollout, up to 6 400 iterations, checkpoint every 50 iterations.
+PPO with asymmetric actor-critic (actor/critic each 512-256-128 MLP, ELU activation, `entropy_coef=0.01`). Logs to W&B project `mjlab_piplus`. 24 steps per env per rollout. Per task:
+
+| task | experiment | max iterations | save interval |
+|---|---|---|---|
+| velocity | `piplus_velocity` | 3 200 | 200 |
+| path | `piplus_path` | 3 200 | 200 |
+| multi | `piplus_multi` | 6 400 | 200 |
+| standup imitation | `piplus_standup_imitation` | 1 000 | 100 |
 
 Each task's RL cfg carries its own symmetry class from `mdp/symmetry.py`, and
 the two enforcement paths are configured independently — `use_data_augmentation`

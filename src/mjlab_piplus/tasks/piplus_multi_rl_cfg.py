@@ -19,7 +19,7 @@ class PiPlusMultiPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
   # Left-right symmetry for the multi task. Unlike velocity/path this env
   # actuates the arms (20 DoF) and its command is the MultiCommand composite
   # [one_hot(6) | velocity(3) | path(2N+2) | footstep(8M) | goal_pose(4) |
-  # kick(7)], so the mirror is built from that block list -- see symmetry.py.
+  # kick(3)], so the mirror is built from that block list -- see symmetry.py.
   # The sub-command sizes are taken from the env cfg's own constants so the two
   # cannot drift apart.
   symmetry_cfg: dict[str, Any] | None = field(

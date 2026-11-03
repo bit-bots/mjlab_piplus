@@ -370,7 +370,7 @@ class KickCommand(CommandTerm):
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     self._begin_ball_life(env_ids)
 
-  def _update_command(self) -> None:
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
     active = self._active()
     self._apply_pending_placement()
 

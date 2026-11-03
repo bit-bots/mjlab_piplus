@@ -10,7 +10,7 @@ description = "PiPlus mjlab project"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "mjlab",
+    "mjlab==1.6.0",
     "onnxruntime",
     "wandb>=0.28.1",
 ]
@@ -28,4 +28,4 @@ ignore = ["B011"]
 
 
 [tool.uv.sources]
-mjlab = { git = "https://github.com/mujocolab/mjlab.git", rev = "011a5ab441590a81664a813ff0160e99f5835aa6" }
+mjlab = { git = "https://github.com/mujocolab/mjlab.git"}

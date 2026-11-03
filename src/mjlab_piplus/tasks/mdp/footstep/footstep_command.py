@@ -548,7 +548,7 @@ class FootstepCommand(CommandTerm):
       dim=-1,
     )
 
-  def _update_command(self) -> None:
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
     step = self.step_index()  # index of the next touchdown
     # Under a MultiCommand only the *selected* sub-command is resampled at an
     # episode reset, so an inactive footstep term keeps a plan whose base index

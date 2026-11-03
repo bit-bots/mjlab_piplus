@@ -138,6 +138,7 @@ SELF_PAD_COLLISION = CollisionCfg(
   contype=2,
   conaffinity=2,
   condim=3,
+  priority=0,
   disable_other_geoms=False,
 )
 """Activate the MJCF's ``*_selfpad`` geoms by putting them on bit 2.

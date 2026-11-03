@@ -176,7 +176,7 @@ class GoalPoseCommand(CommandTerm):
     )
     self._pending_place[env_ids] = True
 
-  def _update_command(self) -> None:
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
     # Anchor any goal sampled since the last update on the current robot pose.
     pending = self._pending_place.nonzero().flatten()
     if len(pending) > 0:
@@ -475,7 +475,7 @@ class UniformVelocityCommandWithStop(CommandTerm):
       )
       self.robot.write_root_state_to_sim(root_state, init_vel_env_ids)
 
-  def _update_command(self) -> None:
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
     if self.cfg.heading_command:
       self.heading_error = wrap_to_pi(self.heading_target - self.robot.data.heading_w)
       env_ids = self.is_heading_env.nonzero(as_tuple=False).flatten()
@@ -599,8 +599,14 @@ class UniformVelocityCommandWithStop(CommandTerm):
     if self._stand_checkbox is not None:
       self.stand_flag[idx, 0] = 1.0 if self._stand_checkbox.value else 0.0
 
-  def compute(self, dt: float) -> None:
-    super().compute(dt)
+  def compute(
+    self, dt: float | torch.Tensor, env_ids: torch.Tensor | None = None
+  ) -> None:
+    super().compute(dt, env_ids)
+    # Viewer input is a per-step thing; the reset-path call (env_ids set) must
+    # not re-apply a joystick value or a queued push.
+    if env_ids is not None:
+      return
     self.apply_joystick()
     if self.joystick_gate is None:
       self._push_gui.apply(self._env)

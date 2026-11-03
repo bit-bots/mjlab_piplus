@@ -149,7 +149,7 @@ class StandCommand(CommandTerm):
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     pass
 
-  def _update_command(self) -> None:
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
     pass
 
 
@@ -263,12 +263,22 @@ class MultiCommand(CommandTerm):
 
   # Command lifecycle.
 
-  def compute(self, dt: float) -> None:
+  def compute(
+    self, dt: float | torch.Tensor, env_ids: torch.Tensor | None = None
+  ) -> None:
+    # Mirrors ``CommandTerm.compute``: env_ids is None on the per-step update
+    # (dt may then be a per-env tensor, zero for freshly auto-reset envs) and
+    # the reset env ids when called from ``env.reset()`` with dt=0.
     self._update_metrics()
     for term in self.terms.values():
       term._update_metrics()
-    self.time_left -= dt
-    resample_env_ids = (self.time_left <= 0.0).nonzero().flatten()
+    if env_ids is None:
+      self.time_left -= dt
+      resample_env_ids = (self.time_left <= 0.0).nonzero().flatten()
+    else:
+      assert not isinstance(dt, torch.Tensor)
+      self.time_left[env_ids] -= dt
+      resample_env_ids = env_ids[self.time_left[env_ids] <= 0.0]
     if len(resample_env_ids) > 0:
       self._resample(resample_env_ids)
     # Before the masks and _update_command: pinning a type in the viewer is a
@@ -281,7 +291,9 @@ class MultiCommand(CommandTerm):
       term = self.terms[name]
       if isinstance(term, ActiveAwareTerm):
         term.active_env_mask = self.active_type == i
-    self._update_command()
+    self._update_command(env_ids)
+    if env_ids is not None:
+      return
     # Sub-terms are driven through ``_update_command`` above and never through
     # their own ``compute``, so their viewer controls would otherwise never be
     # read. Run them last: the joystick has to overwrite the sampled command.
@@ -297,9 +309,9 @@ class MultiCommand(CommandTerm):
     for i, name in enumerate(self.term_names):
       self.metrics[f"active_{name}"] += (self.active_type == i).float() * share
 
-  def _update_command(self) -> None:
+  def _update_command(self, env_ids: torch.Tensor | None) -> None:
     for term in self.terms.values():
-      term._update_command()
+      term._update_command(env_ids)
 
   def _resample(self, env_ids: torch.Tensor) -> None:
     """Redraw the type, resample the selected sub-command, arm its timer.
